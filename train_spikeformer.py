@@ -257,6 +257,36 @@ def train():
     # )
 
     # ============================================
+    # RESUME FROM CHECKPOINT
+    # ============================================
+    global_step = 0
+    best_val = float("inf")
+    start_epoch = 1
+    
+    os.makedirs("checkpoints", exist_ok=True)
+    latest_ckpt_path = "checkpoints/spikeformer2_latest.pt"
+    
+    if os.path.exists(latest_ckpt_path):
+        print(f"🔄 Found checkpoint: {latest_ckpt_path}")
+        checkpoint = torch.load(latest_ckpt_path, map_location=DEVICE)
+        
+        model.load_state_dict(checkpoint["model"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        scheduler.load_state_dict(checkpoint["scheduler"])
+        
+        global_step = checkpoint["step"]
+        best_val = checkpoint.get("val_loss", float("inf"))
+        
+        # Estimation de l'époque de reprise (approximatif)
+        steps_per_epoch = len(train_loader)
+        start_epoch = (global_step // steps_per_epoch) + 1
+        
+        print(f"✅ Resumed training from step {global_step} (Epoch {start_epoch})")
+        print(f"   Best val loss so far: {best_val:.4f}")
+    else:
+        print("🆕 No checkpoint found, starting fresh training.")
+
+    # ============================================
     # LOSS FUNCTION - Corrigée
     # ============================================
     def step_loss(logits_steps: Tensor, tgt_out: Tensor) -> Tensor:
@@ -376,8 +406,10 @@ def train():
     # ============================================
     # TRAINING LOOP
     # ============================================
-    global_step = 0
-    best_val = float("inf")
+    # ============================================
+    # TRAINING LOOP
+    # ============================================
+    # global_step et best_val sont déjà initialisés plus haut
 
     print("="*60)
     print("Début de l'entraînement")
@@ -404,7 +436,7 @@ def train():
     else:
         print("✅ Tous les paramètres sont dans l'optimizer")
 
-    for epoch in range(1, NUM_EPOCHS + 1):
+    for epoch in range(start_epoch, NUM_EPOCHS + 1):
         model.train()
         running_loss = 0.0
         t0 = time.time()
@@ -501,6 +533,23 @@ def train():
                         }
                     }, ckpt_path)
                     print(f"✅ Saved best checkpoint to {ckpt_path} (val_loss: {val_loss:.4f})\n")
+                
+                # Save latest checkpoint (for resuming)
+                torch.save({
+                    "model": model.state_dict(), 
+                    "optimizer": optimizer.state_dict(), 
+                    "scheduler": scheduler.state_dict(),
+                    "step": global_step,
+                    "val_loss": val_loss,
+                    "config": {
+                        "emb_size": EMB_SIZE,
+                        "nhead": NHEAD,
+                        "num_encoder_layers": NUM_ENCODER_LAYERS,
+                        "num_decoder_layers": NUM_DECODER_LAYERS,
+                        "vocab_size": VOCAB_SIZE,
+                    }
+                }, latest_ckpt_path)
+                print(f"💾 Saved latest checkpoint to {latest_ckpt_path}")
                 
                 model.train()
 
