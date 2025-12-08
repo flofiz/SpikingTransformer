@@ -5,7 +5,6 @@ from .Decoder import Decoder
 from .ImageEncoder import CNNBackbone
 from .Lif import LIF
 import math
-from spikingjelly.activation_based import neuron, layer, functional
 
 from torch import Tensor
 
@@ -137,7 +136,6 @@ class Seq2Seq(nn.Module):
     @torch.no_grad()
     def greedy_decode(self, src: Tensor, max_len: int, start_symbol: int, eos_idx: int, pad_idx: int, device: str = "cuda"):
         # src: (C,H,W) or (1,C,H,W)
-        functional.reset_net(self)
         if src.dim() == 3:
             src = src.unsqueeze(0)
         src = src.to(device)
@@ -148,7 +146,6 @@ class Seq2Seq(nn.Module):
         out = None
 
         for _ in range(max_len - 1):
-            functional.reset_net(self)
             tgt_mask = self.create_decoder_mask(ys, pad_idx, device)  # (1,1,T,T) float 0/1
             out, dec_attn = self.decode(ys, memory, tgt_mask)    # out: (steps, 1, T, V)
 

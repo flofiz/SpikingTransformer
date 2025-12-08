@@ -1,0 +1,4 @@
+*.log
+*.logs
+Triton_Layers/Lif_bcp.py
+notebook.ipynb
