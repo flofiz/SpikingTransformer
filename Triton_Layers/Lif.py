@@ -222,7 +222,7 @@ def lif_backward_kernel(
     v_mem = tl.load(v_init_base + neuron_offsets * stride_v_init_n, 
                     mask=neuron_mask, other=0.0)
     
-    for t in range(0, BLOCK_SIZE_T):
+    for t in range(0, T):
         current_in = tl.load(input_base + t * stride_in_t + neuron_offsets * stride_in_n, 
                              mask=neuron_mask, other=0.0)
         v_mem = v_mem * beta + current_in # <-- MODIFIÉ
