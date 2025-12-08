@@ -283,10 +283,9 @@ class WikiTextDataCollator:
     """
     Collator qui gère la tokenisation dynamique et le padding.
     """
-    def __init__(self, processor, max_length: int = 128, pad_to_multiple_of: int = None):
+    def __init__(self, processor, max_length: int = 128):
         self.processor = processor
         self.max_length = max_length
-        self.pad_to_multiple_of = pad_to_multiple_of
 
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         # 1. Stack des images et masques
@@ -302,7 +301,6 @@ class WikiTextDataCollator:
             padding=True,              # Pad à la séquence la plus longue du batch
             truncation=True,           # Tronque si dépasse max_length
             max_length=self.max_length,
-            pad_to_multiple_of=self.pad_to_multiple_of, # Pad à un multiple (ex: 64) pour éviter recompilation Triton
             return_tensors="pt"
         ).input_ids
         

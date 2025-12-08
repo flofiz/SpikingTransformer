@@ -28,12 +28,11 @@ class LIFLayer(torch.autograd.Function):
         lif_forward_kernel[grid](
             input_current, output_spikes, v_mem_final,
             v_mem_init, 
-            beta, v_th, v_reset,  # <-- MODIFIÉ: On passe les tenseurs
+            beta, v_th, v_reset,
             T, N_BATCH, N_NEURONS,
             input_current.stride(0), input_current.stride(1), input_current.stride(2),
             output_spikes.stride(0), output_spikes.stride(1), output_spikes.stride(2),
-            v_mem_init.stride(0), v_mem_init.stride(1),
-            BLOCK_SIZE_T=T
+            v_mem_init.stride(0), v_mem_init.stride(1)
         )
         
         # <-- MODIFIÉ: Sauvegarder tous les tenseurs apprenables
@@ -81,7 +80,7 @@ class LIFLayer(torch.autograd.Function):
             grad_beta_per_neuron,
             input_current, output_spikes, v_mem_init,
             v_mem_history,
-            beta, v_th, v_reset, # <-- MODIFIÉ: On passe les tenseurs
+            beta, v_th, v_reset,
             k_superspike, T, N_BATCH, N_NEURONS,
             grad_output_spikes.stride(0), grad_output_spikes.stride(1), grad_output_spikes.stride(2),
             grad_input.stride(0), grad_input.stride(1), grad_input.stride(2),
@@ -90,8 +89,7 @@ class LIFLayer(torch.autograd.Function):
             input_current.stride(0), input_current.stride(1), input_current.stride(2),
             output_spikes.stride(0), output_spikes.stride(1), output_spikes.stride(2),
             v_mem_init.stride(0), v_mem_init.stride(1),
-            v_mem_history.stride(0), v_mem_history.stride(1), v_mem_history.stride(2),
-            BLOCK_SIZE_T=T
+            v_mem_history.stride(0), v_mem_history.stride(1), v_mem_history.stride(2)
         )
         
         grad_beta = torch.sum(grad_beta_per_neuron)
@@ -114,7 +112,7 @@ class LIFLayer(torch.autograd.Function):
         triton.Config({'BLOCK_SIZE_N': 512}, num_warps=16, num_stages=2),
         triton.Config({'BLOCK_SIZE_N': 1024}, num_warps=16, num_stages=3),
     ],
-    key=['N_NEURONS']
+    key=[]
 )
 @triton.jit
 def lif_forward_kernel(
@@ -123,13 +121,12 @@ def lif_forward_kernel(
     BETA_PTR,         # <-- MODIFIÉ: Pointeur
     V_TH_PTR,         # <-- MODIFIÉ: Pointeur
     V_RESET_PTR,      # <-- MODIFIÉ: Pointeur
-    T: tl.constexpr, 
+    T, 
     N_BATCH: tl.constexpr, 
-    N_NEURONS: tl.constexpr,
+    N_NEURONS,
     stride_in_t, stride_in_b, stride_in_n,
     stride_out_t, stride_out_b, stride_out_n,
     stride_v_b, stride_v_n,
-    BLOCK_SIZE_T: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr
 ):
     pid_batch = tl.program_id(axis=0)
@@ -151,7 +148,7 @@ def lif_forward_kernel(
     
     v_mem = tl.load(v_init_base + neuron_offsets * stride_v_n, mask=neuron_mask, other=0.0)
     
-    for t in range(0, BLOCK_SIZE_T):
+    for t in range(0, T):
         current_in = tl.load(in_base + t * stride_in_t + neuron_offsets * stride_in_n, 
                              mask=neuron_mask, other=0.0)
         
@@ -178,7 +175,7 @@ def lif_forward_kernel(
         triton.Config({'BLOCK_SIZE_N': 512}, num_warps=16, num_stages=2),
         triton.Config({'BLOCK_SIZE_N': 1024}, num_warps=16, num_stages=3),
     ],
-    key=['N_NEURONS']
+    key=[]
 )
 @triton.jit
 def lif_backward_kernel(
@@ -190,7 +187,7 @@ def lif_backward_kernel(
     V_TH_PTR,         # <-- MODIFIÉ: Pointeur
     V_RESET_PTR,      # <-- MODIFIÉ: Pointeur
     K_SUPERSPIKE: tl.constexpr, # <-- K_SUPERSPIKE reste constexpr (il est fixe)
-    T: tl.constexpr, N_BATCH: tl.constexpr, N_NEURONS: tl.constexpr,
+    T, N_BATCH: tl.constexpr, N_NEURONS,
     stride_grad_out_t, stride_grad_out_b, stride_grad_out_n,
     stride_grad_in_t, stride_grad_in_b, stride_grad_in_n,
     stride_grad_v_b, stride_grad_v_n,
@@ -199,7 +196,6 @@ def lif_backward_kernel(
     stride_out_t, stride_out_b, stride_out_n,
     stride_v_init_b, stride_v_init_n,
     stride_v_hist_t, stride_v_hist_b, stride_v_hist_n,
-    BLOCK_SIZE_T: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr
 ):
     pid_batch = tl.program_id(axis=0)
@@ -242,7 +238,7 @@ def lif_backward_kernel(
     
     grad_beta_accumulator = tl.zeros(neuron_offsets.shape, dtype=tl.float32)
 
-    for t in range(BLOCK_SIZE_T - 1, -1, -1):
+    for t in range(T - 1, -1, -1):
         v_mem_t = tl.load(v_hist_base + t * stride_v_hist_t + neuron_offsets * stride_v_hist_n, 
                           mask=neuron_mask, other=0.0)
         spike_t = tl.load(spike_base + t * stride_out_t + neuron_offsets * stride_out_n, 
