@@ -186,7 +186,7 @@ def train():
     )
 
     # ✅ Data Collator pour padding dynamique
-    data_collator = WikiTextDataCollator(processor, max_length=MAX_CHARS)
+    data_collator = WikiTextDataCollator(processor, max_length=MAX_CHARS, pad_to_multiple_of=64)
 
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, num_workers=8, prefetch_factor=2,          # Précharge 2 batches par worker (16 batches total!)
     persistent_workers=True,     # Important pour le streaming
