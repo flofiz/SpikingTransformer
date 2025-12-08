@@ -13,7 +13,7 @@ from torch.cuda.amp import autocast, GradScaler
 from transformers import TrOCRProcessor
 import torch.nn.functional as F
 from Triton_Layers.Seq2Seq import Seq2Seq as Seq2SeqTransformer
-from wiki_text_images3 import WikiTextImageDataset
+from wiki_text_images3 import WikiTextImageDataset, WikiTextDataCollator
 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -185,15 +185,20 @@ def train():
         ]
     )
 
+    # ✅ Data Collator pour padding dynamique
+    data_collator = WikiTextDataCollator(processor, max_length=MAX_CHARS)
 
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, num_workers=8, prefetch_factor=2,          # Précharge 2 batches par worker (16 batches total!)
     persistent_workers=True,     # Important pour le streaming
     pin_memory=True,            # Si vous utilisez un GPU
-    drop_last=True,)
+    drop_last=True,
+    collate_fn=data_collator)    # ✅ Ajout du collator
+
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, num_workers=8, prefetch_factor=2,          # Précharge 2 batches par worker (16 batches total!)
     persistent_workers=True,     # Important pour le streaming
     pin_memory=True,            # Si vous utilisez un GPU
-    drop_last=True,)
+    drop_last=True,
+    collate_fn=data_collator)    # ✅ Ajout du collator
 
     # ============================================
     # MODEL

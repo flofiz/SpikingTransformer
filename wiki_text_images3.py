@@ -278,6 +278,39 @@ class TextSourceConfig:
     ]
 
 
+
+class WikiTextDataCollator:
+    """
+    Collator qui gère la tokenisation dynamique et le padding.
+    """
+    def __init__(self, processor, max_length: int = 128):
+        self.processor = processor
+        self.max_length = max_length
+
+    def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+        # 1. Stack des images et masques
+        pixel_values = torch.stack([item["pixel_values"] for item in batch])
+        pixel_mask = torch.stack([item["pixel_mask"] for item in batch])
+        
+        # 2. Récupération des textes bruts
+        texts = [item["text_label"] for item in batch]
+        
+        # 3. Tokenisation dynamique (pad au max du batch)
+        labels = self.processor.tokenizer(
+            texts,
+            padding=True,              # Pad à la séquence la plus longue du batch
+            truncation=True,           # Tronque si dépasse max_length
+            max_length=self.max_length,
+            return_tensors="pt"
+        ).input_ids
+        
+        return {
+            "pixel_values": pixel_values,
+            "pixel_mask": pixel_mask,
+            "labels": labels,
+        }
+
+
 class MultiSourceTextDataset(IterableDataset):
     """
     Dataset infini multi-sources optimisé.
@@ -565,18 +598,19 @@ class MultiSourceTextDataset(IterableDataset):
                 return_mask=True
             )
 
-            # Tokenisation
-            labels = self.processor.tokenizer(
-                text, 
-                padding="max_length", 
-                max_length=self.max_target_length, 
-                truncation=True
-            ).input_ids
+            # Tokenisation déplacée dans le collator
+            # labels = self.processor.tokenizer(
+            #     text, 
+            #     padding="max_length", 
+            #     max_length=self.max_target_length, 
+            #     truncation=True
+            # ).input_ids
 
             yield {
                 "pixel_values": pixel_values,  # (1, H, W) - niveaux de gris
                 "pixel_mask": pixel_mask,       # (H, W)
-                "labels": torch.tensor(labels, dtype=torch.long),
+                "text_label": text,             # Texte brut pour le collator
+                # "labels": torch.tensor(labels, dtype=torch.long),
             }
 
 
@@ -931,15 +965,17 @@ class WikiTextImageDataset(torch.utils.data.Dataset):
             return_mask=True
         )
 
-        labels = self.processor.tokenizer(
-            text, 
-            padding="max_length", 
-            max_length=self.max_target_length, 
-            truncation=True
-        ).input_ids
+        # Tokenisation déplacée dans le collator
+        # labels = self.processor.tokenizer(
+        #     text, 
+        #     padding="max_length", 
+        #     max_length=self.max_target_length, 
+        #     truncation=True
+        # ).input_ids
 
         return {
             "pixel_values": pixel_values,  # (1, H, W) - niveaux de gris
             "pixel_mask": pixel_mask,       # (H, W)
-            "labels": torch.tensor(labels, dtype=torch.long),
+            "text_label": text,             # Texte brut pour le collator
+            # "labels": torch.tensor(labels, dtype=torch.long),
         }
