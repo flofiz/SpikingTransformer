@@ -1,0 +1,23 @@
+name: spiking_transformer
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.1
+  - numpy
+  - pillow
+  - tqdm
+  - pip
+  - pip:
+    - transformers
+    - datasets
+    - einops
+    - spikingjelly
+    - triton
+    - accelerate  # Often needed for transformers
