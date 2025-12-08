@@ -1,2 +1,1 @@
 # SpikingTransformer
-# SpikingTransformer
