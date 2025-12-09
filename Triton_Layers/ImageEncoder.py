@@ -62,13 +62,17 @@ class RPE2D(nn.Module):
 
 
 class CNNBackbone(nn.Module):
-    def __init__(self, d_model=512, nb_layers=11, patch_size=4, n_steps=1, threshold=0.5):
+    def __init__(self, d_model=512, nb_layers=11, patch_size=4, n_steps=1, threshold=0.5, in_channels=1):
         super().__init__()
         self.nb_layers = nb_layers
         self.d_model = d_model
         self.layers = nn.ModuleList([FusedInvertedBottleneck(n_steps=n_steps, threshold=threshold) for _ in range(nb_layers)])
         self.space_to_depth = nn.PixelUnshuffle(patch_size)
-        self.conv1 = nn.Conv2d(16, 128, kernel_size=3, stride=1, padding=1)
+        
+        # Input: [B, C, H, W] -> PixelUnshuffle -> [B, C * patch_size^2, H/p, W/p]
+        pixel_unshuffle_dim = in_channels * (patch_size ** 2)
+        
+        self.conv1 = nn.Conv2d(pixel_unshuffle_dim, 128, kernel_size=3, stride=1, padding=1)
         self.bn1 = nn.BatchNorm2d(128)
         self.lif_1 = LIF(n_steps=n_steps, beta=0.5)
         self.conv2 = nn.Conv2d(128, 64, kernel_size=1, stride=1, padding=0)
