@@ -1,6 +1,7 @@
 
 *.log
 *.logs
+checkpoints/
 Triton_Layers/Lif_bcp.py
 notebook.ipynb
 # Byte-compiled / optimized / DLL files
