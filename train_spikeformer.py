@@ -81,6 +81,53 @@ def get_decoder_start_id(tokenizer) -> int:
     return tokenizer.pad_token_id
 
 
+def compute_token_accuracy(logits: Tensor, targets: Tensor, pad_idx: int) -> float:
+    """
+    Calcule la précision des tokens (hors padding).
+    logits: (B, T, V)
+    targets: (B, T)
+    """
+    preds = torch.argmax(logits, dim=-1)  # (B, T)
+    mask = targets != pad_idx
+    correct = (preds == targets) & mask
+    return correct.sum().float() / max(1.0, mask.sum().float())
+
+
+def levenshtein_distance(s1: str, s2: str) -> int:
+    """Calcul de la distance de Levenshtein (édition) entre deux chaînes."""
+    if len(s1) < len(s2):
+        return levenshtein_distance(s2, s1)
+    if len(s2) == 0:
+        return len(s1)
+    
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    
+    return previous_row[-1]
+
+
+def compute_cer(preds: List[str], targets: List[str]) -> float:
+    """
+    Calcule le Character Error Rate (CER).
+    CER = (Sub + Del + Ins) / len(Reference)
+    """
+    total_dist = 0
+    total_len = 0
+    for p, t in zip(preds, targets):
+        dist = levenshtein_distance(p, t)
+        total_dist += dist
+        total_len += len(t)
+    
+    return total_dist / max(1, total_len)
+
+
 def train():
     # ============================================
     # HYPERPARAMETERS - Optimisés
@@ -279,10 +326,13 @@ def train():
     # EVALUATION FUNCTION
     # ============================================
     @torch.no_grad()
-    def evaluate() -> Tuple[float, float]:
+    def evaluate() -> Tuple[float, float, float, float]:
         model.eval()
         eval_loss = 0.0
+        eval_acc = 0.0
+        eval_cer = 0.0
         n_batches = 0
+        
         eval_pbar = tqdm(val_loader, desc="  Evaluation  ", unit="batch")
         for batch in eval_pbar:
             src = batch["pixel_values"].to(DEVICE, non_blocking=True)
@@ -301,10 +351,32 @@ def train():
                 # ✅ Pas de log_softmax ici !
                 loss = step_loss(logits_steps, tgt_out)
             
+            # --- Metrics ---
+            mean_logits = logits_steps.mean(dim=0)
+            
+            # 1. Token Accuracy
+            acc = compute_token_accuracy(mean_logits, tgt_out, PAD_IDX)
+            
+            # 2. CER (Character Error Rate)
+            # Décodage pour CER (coûteux, donc fait sur batch complet ou sous-échantillon)
+            # On le fait sur tout le batch pour précision
+            pred_strs = strings_from_logits_until_eos(processor, mean_logits, EOS_IDX)
+            tgt_strs = tokens_to_strings_until_eos(processor, tgt_out, EOS_IDX)
+            cer = compute_cer(pred_strs, tgt_strs)
+            
             eval_loss += loss.item()
+            eval_acc += acc.item()
+            eval_cer += cer
             n_batches += 1
+            
+            # Update pbar
+            eval_pbar.set_postfix({"L": f"{loss.item():.3f}", "A": f"{acc.item():.1%}", "C": f"{cer:.1%}"})
         
-        return eval_loss / max(1, n_batches), scheduler.get_last_lr()[0]
+        avg_loss = eval_loss / max(1, n_batches)
+        avg_acc = eval_acc / max(1, n_batches)
+        avg_cer = eval_cer / max(1, n_batches)
+        
+        return avg_loss, avg_acc, avg_cer, scheduler.get_last_lr()[0]
 
     # ============================================
     # PRINT EXAMPLES FUNCTION
@@ -407,6 +479,7 @@ def train():
     for epoch in range(1, NUM_EPOCHS + 1):
         model.train()
         running_loss = 0.0
+        running_acc = 0.0
         t0 = time.time()
         pbar = tqdm(
             train_loader, 
@@ -436,6 +509,11 @@ def train():
                 # ✅ CORRECTION: Suppression du log_softmax
                 # logits_steps reste des logits bruts
                 loss = step_loss(logits_steps, tgt_out)
+                
+                # Metric: Token accuracy (sur le dernier step ou moyenne des logits)
+                # On utilise la moyenne des steps pour la décision finale (comme en inférence)
+                mean_logits = logits_steps.mean(dim=0)
+                acc = compute_token_accuracy(mean_logits, tgt_out, PAD_IDX)
 
             scaler.scale(loss).backward()
             # print("\n=== GRADIENT NORMS ===")
@@ -456,13 +534,17 @@ def train():
             scheduler.step()  # ✅ Step après chaque batch (requis pour OneCycleLR)
         
             running_loss += loss.item()
+            running_acc += acc.item()
 
             # Logging régulier
             if global_step % LOG_EVERY == 0:
                 avg_loss = running_loss / LOG_EVERY
+                avg_acc = running_acc / LOG_EVERY
                 running_loss = 0.0
+                running_acc = 0.0
                 pbar.set_postfix({
                     "Loss": f"{avg_loss:.4f}", 
+                    "Acc": f"{avg_acc:.2%}",
                     "LR": f"{scheduler.get_last_lr()[0]:.2e}"
                 })
             
@@ -475,10 +557,12 @@ def train():
 
             # Evaluation périodique
             if global_step % EVAL_EVERY == 0:
-                val_loss, cur_lr = evaluate()
+                val_loss, val_acc, val_cer, cur_lr = evaluate()
                 print(f"\n{'='*60}")
                 print(f"📊 Evaluation @ step {global_step}/{total_steps}")
                 print(f"   Val Loss: {val_loss:.4f}")
+                print(f"   Val Acc : {val_acc:.2%}")
+                print(f"   Val CER : {val_cer:.2%}")
                 print(f"   Learning Rate: {cur_lr:.2e}")
                 print(f"{'='*60}\n", flush=True)
                 
@@ -491,7 +575,10 @@ def train():
                         "optimizer": optimizer.state_dict(), 
                         "scheduler": scheduler.state_dict(),  # ✅ Sauvegarde du scheduler
                         "step": global_step,
+                        "step": global_step,
                         "val_loss": val_loss,
+                        "val_acc": val_acc,
+                        "val_cer": val_cer,
                         "config": {
                             "emb_size": EMB_SIZE,
                             "nhead": NHEAD,
