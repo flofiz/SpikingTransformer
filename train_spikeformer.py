@@ -474,9 +474,52 @@ def train():
             if param in missing:
                 print(f"  - {name}")
     else:
+
         print("✅ Tous les paramètres sont dans l'optimizer")
 
-    for epoch in range(1, NUM_EPOCHS + 1):
+    # ============================================
+    # RESUME FROM CHECKPOINT
+    # ============================================
+    ckpt_path = "checkpoints/spikeformer2_best.pt"
+    start_epoch = 1
+    
+    if os.path.exists(ckpt_path):
+        print(f"\n{'='*60}")
+        print(f"🔄 Checkpoint trouvé: {ckpt_path}")
+        print("Chargement en cours...")
+        
+        checkpoint = torch.load(ckpt_path, map_location=DEVICE)
+        
+        # Charger le modèle
+        msg = model.load_state_dict(checkpoint["model"], strict=False)
+        print(f"Model loaded: {msg}")
+        
+        # Charger l'optimizer
+        if "optimizer" in checkpoint and checkpoint["optimizer"] is not None:
+            optimizer.load_state_dict(checkpoint["optimizer"])
+            print("Optimizer loaded")
+            
+        # Charger le scheduler
+        if "scheduler" in checkpoint and checkpoint["scheduler"] is not None:
+            scheduler.load_state_dict(checkpoint["scheduler"])
+            print("Scheduler loaded")
+            
+        # Charger les scalaires
+        global_step = checkpoint.get("step", 0)
+        best_val = checkpoint.get("val_loss", float("inf"))
+        
+        # Estimer l'epoch de départ (approximatif)
+        steps_per_epoch = len(train_loader)
+        if steps_per_epoch > 0:
+            start_epoch = (global_step // steps_per_epoch) + 1
+            
+        print(f"Make sure to adjust LR scheduling if needed.")
+        print(f"Resuming from step {global_step} (Epoch {start_epoch}), Best Val Loss: {best_val:.4f}")
+        print(f"{'='*60}\n", flush=True)
+    else:
+        print(f"\n⚠️ Aucun checkpoint trouvé à {ckpt_path}. Démarrage de zéro.\n", flush=True)
+
+    for epoch in range(start_epoch, NUM_EPOCHS + 1):
         model.train()
         running_loss = 0.0
         running_acc = 0.0
