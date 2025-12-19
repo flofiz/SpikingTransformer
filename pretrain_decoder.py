@@ -10,7 +10,7 @@ from wiki_text_images3 import WikiTextDataCollator, MultiSourceTextDataset
 
 # CONFIG
 DEVICE = "cuda:1"
-BATCH_SIZE = 64
+BATCH_SIZE = 32
 NUM_EPOCHS = 5
 LR = 5e-4
 MAX_CHARS = 128
