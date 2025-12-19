@@ -30,7 +30,8 @@ class PretrainEncoderModel(nn.Module):
             patch_size=patch_size,
             d_model=d_model,
             n_steps=n_steps,
-            in_channels=3  # ImageNet est RGB
+            in_channels=3,  # ImageNet est RGB
+            img_height=224  # ImageNet standard size
         )
         
         # 2. Transformer Encoder

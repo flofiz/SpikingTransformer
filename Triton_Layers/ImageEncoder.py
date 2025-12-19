@@ -29,9 +29,10 @@ class FusedInvertedBottleneck(nn.Module):
 
 
 class ReduceConvBlock(nn.Module):
-    def __init__(self, in_channels=1, out_channels=512, n_steps=1, threshold=0.5):
+    def __init__(self, in_channels=64, out_channels=512, height_after_patch=8, n_steps=1, threshold=0.5):
         super().__init__()
-        self.conv = nn.Conv2d(64 * 8, out_channels, kernel_size=1)
+        # After rearrange: (c, h, w) -> (c*h, 1, w), so input channels = in_channels * height_after_patch
+        self.conv = nn.Conv2d(in_channels * height_after_patch, out_channels, kernel_size=1)
         self.bn = nn.BatchNorm2d(out_channels)
         self.lif = LIF(n_steps=n_steps, beta=0.5)
 
@@ -62,7 +63,7 @@ class RPE2D(nn.Module):
 
 
 class CNNBackbone(nn.Module):
-    def __init__(self, d_model=512, nb_layers=11, patch_size=4, n_steps=1, threshold=0.5, in_channels=1):
+    def __init__(self, d_model=512, nb_layers=11, patch_size=4, n_steps=1, threshold=0.5, in_channels=1, img_height=32):
         super().__init__()
         self.nb_layers = nb_layers
         self.d_model = d_model
@@ -78,7 +79,10 @@ class CNNBackbone(nn.Module):
         self.conv2 = nn.Conv2d(128, 64, kernel_size=1, stride=1, padding=0)
         self.bn2 = nn.BatchNorm2d(64)
         self.lif_2 = LIF(n_steps=n_steps, beta=0.5)
-        self.reduce = ReduceConvBlock(64, d_model, n_steps=n_steps, threshold=threshold)
+        
+        # Height after patch processing
+        height_after_patch = img_height // patch_size
+        self.reduce = ReduceConvBlock(in_channels=64, out_channels=d_model, height_after_patch=height_after_patch, n_steps=n_steps, threshold=threshold)
         self.rpe = RPE2D(d_model, n_steps=n_steps, threshold=threshold)
 
 

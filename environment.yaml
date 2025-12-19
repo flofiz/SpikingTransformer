@@ -18,6 +18,5 @@ dependencies:
     - transformers
     - datasets
     - einops
-    - spikingjelly
     - triton
     - accelerate  # Often needed for transformers

@@ -52,7 +52,9 @@ class Seq2Seq(nn.Module):
                  alpha=0.125,
                  tgt_vocab_size=1000,
                  nb_sps_blocks=4,
-                 n_steps=10):
+                 n_steps=10,
+                 in_channels=1,
+                 img_height=32):
         super().__init__()
         self.n_steps = n_steps
         
@@ -60,7 +62,9 @@ class Seq2Seq(nn.Module):
             nb_layers=nb_sps_blocks,
             patch_size=patch_size,
             d_model=d_model,
-            n_steps=n_steps
+            n_steps=n_steps,
+            in_channels=in_channels,
+            img_height=img_height
         )
         
         self.encoder = Encoder(
