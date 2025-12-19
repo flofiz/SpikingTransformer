@@ -398,9 +398,11 @@ class LIF(nn.Module):
             )
         
         # 3. Récupérer les paramètres (en tant que tenseurs)
-        beta = torch.sigmoid(self.beta_raw) if self.learn_beta else self.beta
-        v_th = self.v_th if self.learn_v_th else self.v_th
-        v_reset = self.v_reset if self.learn_v_reset else self.v_reset
+        # S'assurer qu'ils sont sur le même device que l'input
+        device = input_current.device
+        beta = torch.sigmoid(self.beta_raw).to(device) if self.learn_beta else self.beta.to(device)
+        v_th = self.v_th.to(device)
+        v_reset = self.v_reset.to(device)
         
         # 4. Appel de la fonction autograd (en passant les TENSEURS)
         # input_current est maintenant [T, B_new, Feat_flat], ce qui est correct (3D)
