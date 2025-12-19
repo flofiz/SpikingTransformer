@@ -387,7 +387,7 @@ class LIF(nn.Module):
         # où T = n_steps et B_new = B // n_steps
         try:
             input_current = input_current.reshape(self.n_steps, original_shape[0] // self.n_steps, *original_shape[1:])
-            input_current = input_current.reshape(self.n_steps, original_shape[0] // self.n_steps, -1)
+            input_current = input_current.reshape(self.n_steps, original_shape[0] // self.n_steps, -1).contiguous()
         except RuntimeError as e:
             # Fournir un message d'erreur plus clair si le reshape échoue
             raise RuntimeError(
