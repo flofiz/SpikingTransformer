@@ -10,7 +10,7 @@ from models_pretraining import PretrainEncoderModel
 
 # CONFIG
 DEVICE = "cuda:0"
-BATCH_SIZE = 128
+BATCH_SIZE = 64
 NUM_EPOCHS = 10
 LR = 1e-3
 IMG_SIZE = 224
