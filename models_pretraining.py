@@ -116,7 +116,7 @@ class PretrainDecoderModel(nn.Module):
         T = self.n_steps
         
         # Expansion temp + LIF
-        tgt = tgt.unsqueeze(0).expand(T, B, L, D).reshape(T*B, L, D)
+        tgt = tgt.unsqueeze(0).expand(T, B, L, D).reshape(T*B, L, D).contiguous()
         tgt, _ = self.lifPE(tgt)
         
         # Mask expansion
