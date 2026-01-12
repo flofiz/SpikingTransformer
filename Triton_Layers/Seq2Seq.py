@@ -58,6 +58,7 @@ class Seq2Seq(nn.Module):
         use_mssa: If True, use Multi-Scale Spiking Attention
         mssa_scales: Scales for MSSA
         in_channels: Number of input channels (1 for grayscale, 3 for RGB)
+        img_height: Height of input images (needed for channel computation)
     """
     def __init__(self,
                  patch_size: int = 16,
@@ -74,7 +75,8 @@ class Seq2Seq(nn.Module):
                  mask_mode: Literal["multiply", "additive"] = "multiply",
                  use_mssa: bool = False,
                  mssa_scales: List[int] = [1, 2, 4],
-                 in_channels: int = 1):
+                 in_channels: int = 1,
+                 img_height: int = 32):
         super().__init__()
         self.n_steps = n_steps
         self.mask_mode = mask_mode
@@ -84,7 +86,8 @@ class Seq2Seq(nn.Module):
             patch_size=patch_size,
             d_model=d_model,
             n_steps=n_steps,
-            in_channels=in_channels
+            in_channels=in_channels,
+            img_height=img_height
         )
         
         self.encoder = Encoder(

@@ -469,6 +469,7 @@ def train():
         use_mssa=USE_MSSA,         # New: Multi-Scale Spiking Attention
         mssa_scales=MSSA_SCALES,   # New: MSSA scales
         in_channels=IN_CHANNELS,   # New: RGB or grayscale input
+        img_height=IMG_SIZE[0],    # New: image height for channel computation
     ).to(config["device"])
 
     # Print model summary

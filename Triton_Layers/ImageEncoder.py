@@ -29,9 +29,21 @@ class FusedInvertedBottleneck(nn.Module):
 
 
 class ReduceConvBlock(nn.Module):
-    def __init__(self, in_channels=1, out_channels=512, n_steps=1, threshold=0.5):
+    """
+    Reduces spatial dimensions and channel count.
+    
+    Args:
+        in_channels: Number of channels before rearrange (typically 64)
+        height_after_unshuffle: Height dimension after PixelUnshuffle (e.g., H/patch_size)
+        out_channels: Output channel dimension (d_model)
+        n_steps: SNN timesteps
+        threshold: LIF threshold
+    """
+    def __init__(self, in_channels=64, height_after_unshuffle=8, out_channels=512, n_steps=1, threshold=0.5):
         super().__init__()
-        self.conv = nn.Conv2d(64 * 8, out_channels, kernel_size=1)
+        # Input channels after rearrange is: in_channels * height_after_unshuffle
+        rearranged_channels = in_channels * height_after_unshuffle
+        self.conv = nn.Conv2d(rearranged_channels, out_channels, kernel_size=1)
         self.bn = nn.BatchNorm2d(out_channels)
         self.lif = LIF(n_steps=n_steps, beta=0.5)
 
@@ -72,6 +84,7 @@ class CNNBackbone(nn.Module):
         n_steps: Number of SNN timesteps
         threshold: LIF neuron threshold
         in_channels: Number of input channels (1 for grayscale, 3 for RGB)
+        img_height: Height of input image (needed to compute ReduceConvBlock channels)
     """
     def __init__(
         self,
@@ -80,18 +93,23 @@ class CNNBackbone(nn.Module):
         patch_size: int = 4,
         n_steps: int = 1,
         threshold: float = 0.5,
-        in_channels: int = 1
+        in_channels: int = 1,
+        img_height: int = 32
     ):
         super().__init__()
         self.nb_layers = nb_layers
         self.d_model = d_model
         self.in_channels = in_channels
         self.patch_size = patch_size
+        self.img_height = img_height
         
         # Calculate channels after PixelUnshuffle
         # For grayscale (1 channel): 1 * 16 = 16
         # For RGB (3 channels): 3 * 16 = 48
         unshuffle_channels = in_channels * (patch_size ** 2)
+        
+        # Height after PixelUnshuffle
+        height_after_unshuffle = img_height // patch_size
         
         self.layers = nn.ModuleList([
             FusedInvertedBottleneck(n_steps=n_steps, threshold=threshold) 
@@ -108,7 +126,14 @@ class CNNBackbone(nn.Module):
         self.bn2 = nn.BatchNorm2d(64)
         self.lif_2 = LIF(n_steps=n_steps, beta=0.5)
         
-        self.reduce = ReduceConvBlock(64, d_model, n_steps=n_steps, threshold=threshold)
+        # ReduceConvBlock now uses computed height
+        self.reduce = ReduceConvBlock(
+            in_channels=64, 
+            height_after_unshuffle=height_after_unshuffle,
+            out_channels=d_model, 
+            n_steps=n_steps, 
+            threshold=threshold
+        )
         self.rpe = RPE2D(d_model, n_steps=n_steps, threshold=threshold)
 
 
