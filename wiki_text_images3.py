@@ -788,7 +788,7 @@ class MultiSourceTextDataset(IterableDataset):
                     streaming=True
                 )
 
-            ds = ds.shuffle(seed=self.seed + self.current_source_idx)#, buffer_size=10000)
+            ds = ds.shuffle(seed=self.seed + self.current_source_idx, buffer_size=10000)
             
             if self.split == "test":
                 n_test = int(self.test_size * 100000)
@@ -1112,7 +1112,7 @@ class WikiTextImageDataset(torch.utils.data.Dataset):
                     streaming=True
                 )
             
-            ds = ds.shuffle(seed=self.seed)#, buffer_size=10000)
+            ds = ds.shuffle(seed=self.seed, buffer_size=10000)
             
             if self.split == "test":
                 n_test = int(test_size * 100000)
@@ -1157,45 +1157,16 @@ class WikiTextImageDataset(torch.utils.data.Dataset):
                     dataset_name, 
                     config_name, 
                     split="train", 
-                    streaming=False
+                    streaming=True
                 )
             else:
                 ds = load_dataset(
                     dataset_name, 
                     split="train", 
-                    streaming=False
+                    streaming=True
                 )
             
-            # === Distributed Sharding Logic ===
-            import torch.distributed as dist
-            
-            rank = 0
-            world_size = 1
-            worker_id = 0
-            num_workers = 1
-            
-            if dist.is_available() and dist.is_initialized():
-                rank = dist.get_rank()
-                world_size = dist.get_world_size()
-                
-            worker_info = torch.utils.data.get_worker_info()
-            if worker_info is not None:
-                worker_id = worker_info.id
-                num_workers = worker_info.num_workers
-                
-            # Global Step for uniqueness
-            total_shards = world_size * num_workers
-            shard_idx = rank * num_workers + worker_id
-            
-            # Seed update for shuffle (Primary mechanism)
-            unique_seed = self.seed + self.current_source_idx + shard_idx * 1000
-            ds = ds.shuffle(seed=unique_seed)#, buffer_size=10000)
-            
-            # Explicit sharding if supported (Optional but better)
-            # Streaming datasets often support shard via splitting the underlying files
-            # But simpler here is to trust shuffle with large buffer and unique seed.
-            # To be safe, we can skip ahead if not shuffling locally.
-            # ds = ds.shard(num_shards=total_shards, index=shard_idx) # Optional, might fail on some iterables
+            ds = ds.shuffle(seed=self.seed + self.current_source_idx, buffer_size=10000)
             
             if self.split == "test":
                 n_test = int(self.test_size * 100000)

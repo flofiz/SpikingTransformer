@@ -128,7 +128,7 @@ class SSAMultiHeadAttention(nn.Module):
         super().__init__()
 
         # Scale initialized to smaller value as per paper recommendation
-        self.scale = nn.Parameter(torch.tensor([0.05]), requires_grad=True)
+        self.scale = nn.Parameter(torch.tensor(0.05), requires_grad=True)
         self.mask_mode = mask_mode
         
         self.d_model = d_model
@@ -246,7 +246,7 @@ class SSAMultiHeadAttention(nn.Module):
         log_bias = self.get_log_pe_bias_cross(N, N_k, Q.device)  # (L, L)
         
         # Broadcast sur batch et heads: (L, L) -> (1, 1, L, L)
-        log_bias = log_bias.unsqueeze(0).unsqueeze(0).to(dtype=Q.dtype)
+        log_bias = log_bias.unsqueeze(0).unsqueeze(0)
         attn_output = attn_output + log_bias  # (B, n_heads, L, L)
         
         if attention_mask is not None:

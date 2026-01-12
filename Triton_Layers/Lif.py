@@ -17,22 +17,7 @@ class LIFLayer(torch.autograd.Function):
         T, N_BATCH, N_NEURONS = input_current.shape
         input_current = input_current.contiguous()
         
-        output_spikes = torch.empty_like(input_current, dtype=input_current.dtype)
-        v_mem_init = torch.zeros_like(input_current[0], dtype=torch.float32) # Keep v_mem as float32 for precision usually?
-        # User wants BF16 everything. But kernel might need float32 accum.
-        # However, output_spikes MUST match input dtype for next layer.
-        
-        # Let's keep v_mem internal as float32 for stability if possible, but v_mem_final returned might need to match?
-        # The forward returns (output_spikes, v_mem_final).
-        # ImageEncoder ignores v_mem_final. 
-        # So v_mem_final can be whatever.
-        # But output_spikes MUST be input_current.dtype.
-        
-        # Checking kernel:
-        # lif_forward_kernel receives output_spikes pointer.
-        # If output_spikes is BF16, Triton stores BF16.
-        
-        output_spikes = torch.empty_like(input_current, dtype=input_current.dtype)
+        output_spikes = torch.empty_like(input_current, dtype=torch.float32)
         v_mem_init = torch.zeros_like(input_current[0], dtype=torch.float32)   
         v_mem_final = torch.empty_like(v_mem_init, dtype=torch.float32)
         
@@ -344,22 +329,22 @@ class LIF(nn.Module):
         # --- Paramètre Beta ---
         if learn_beta:
             # Paramètre apprenable (stocké en log-space pour stabilité)
-            self.beta_raw = nn.Parameter(torch.tensor([self._inverse_sigmoid(beta)]))
+            self.beta_raw = nn.Parameter(torch.tensor(self._inverse_sigmoid(beta)))
         else:
             # Paramètre fixe
-            self.register_buffer('beta', torch.tensor([beta]))
+            self.register_buffer('beta', torch.tensor(beta))
         
         # --- Paramètre v_th ---
         if learn_v_th:
-            self.v_th = nn.Parameter(torch.tensor([v_th]))
+            self.v_th = nn.Parameter(torch.tensor(v_th))
         else:
-            self.register_buffer('v_th', torch.tensor([v_th]))
+            self.register_buffer('v_th', torch.tensor(v_th))
             
         # --- Paramètre v_reset ---
         if learn_v_reset:
-            self.v_reset = nn.Parameter(torch.tensor([v_reset]))
+            self.v_reset = nn.Parameter(torch.tensor(v_reset))
         else:
-            self.register_buffer('v_reset', torch.tensor([v_reset]))
+            self.register_buffer('v_reset', torch.tensor(v_reset))
         
         # k_superspike reste toujours fixe (hyperparam du gradient)
         self.register_buffer('k_superspike', torch.tensor(k_superspike))
