@@ -464,7 +464,9 @@ def train():
         pct_start=0.1,
         anneal_strategy='cos',
         div_factor=25,
-        final_div_factor=1e4
+        final_div_factor=1e4,
+        # Flora (and some other custom optimizers) don't support momentum cycling
+        cycle_momentum=(not args.flora)
     )
 
     # ============================================
