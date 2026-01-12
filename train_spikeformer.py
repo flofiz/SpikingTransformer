@@ -435,7 +435,7 @@ def train():
     criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX, label_smoothing=0.1)
     
     if args.flora:
-        if deepspeed.comm.get_rank() == 0:
+        if (not args.deepspeed) or deepspeed.comm.get_rank() == 0:
             print("[Optimizer] Using Flora (Memory Efficient) Optimizer")
         try:
             from flora_opt import Flora
