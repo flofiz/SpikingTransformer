@@ -311,7 +311,8 @@ def train():
 
     if USE_MSSA and NHEAD % len(MSSA_SCALES) != 0:
         NHEAD = len(MSSA_SCALES) * (NHEAD // len(MSSA_SCALES) + 1)
-        if deepspeed.comm.get_rank() == 0:
+        # Only print on rank 0
+        if (not args.deepspeed) or deepspeed.comm.get_rank() == 0:
             print(f"[MSSA] Adjusted NHEAD to {NHEAD}")
 
     # Get available fonts count
@@ -334,7 +335,7 @@ def train():
     init_wandb(args, wandb_config)
     
     # Login only on main process, after distributed init
-    if deepspeed.comm.get_rank() == 0:
+    if (not args.deepspeed) or deepspeed.comm.get_rank() == 0:
         do_wandb_init_on_rank0(args, wandb_config)
         print("="*60)
         print("Configuration:")
