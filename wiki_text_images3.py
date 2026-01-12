@@ -1103,15 +1103,13 @@ class WikiTextImageDataset(torch.utils.data.Dataset):
                     dataset_name, 
                     config_name, 
                     split="train", 
-                    streaming=True, 
-                    trust_remote_code=True
+                    streaming=True
                 )
             else:
                 ds = load_dataset(
                     dataset_name, 
                     split="train", 
-                    streaming=True, 
-                    trust_remote_code=True
+                    streaming=True
                 )
             
             ds = ds.shuffle(seed=self.seed, buffer_size=10000)
@@ -1159,15 +1157,13 @@ class WikiTextImageDataset(torch.utils.data.Dataset):
                     dataset_name, 
                     config_name, 
                     split="train", 
-                    streaming=True, 
-                    trust_remote_code=True
+                    streaming=True
                 )
             else:
                 ds = load_dataset(
                     dataset_name, 
                     split="train", 
-                    streaming=True, 
-                    trust_remote_code=True
+                    streaming=True
                 )
             
             ds = ds.shuffle(seed=self.seed + self.current_source_idx, buffer_size=10000)

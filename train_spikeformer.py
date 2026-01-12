@@ -449,17 +449,34 @@ def train():
     # ============================================
     # DEEPSPEED INIT
     # ============================================
-    # Fix for DeepSpeed "auto" config support
-    if not hasattr(args, "per_device_train_batch_size"):
-        args.per_device_train_batch_size = BATCH_SIZE
-    if not hasattr(args, "gradient_accumulation_steps"):
-        args.gradient_accumulation_steps = 1
+    import json
+    
+    # Load and patch config
+    ds_config_path = "ds_config.json"
+    if args.deepspeed_config:
+        ds_config_path = args.deepspeed_config
+        
+    with open(ds_config_path, "r") as f:
+        ds_config = json.load(f)
+        
+    # Patch "auto" values manually to avoid TypeErrors
+    if ds_config.get("train_micro_batch_size_per_gpu") == "auto":
+        ds_config["train_micro_batch_size_per_gpu"] = BATCH_SIZE
+        
+    if ds_config.get("train_batch_size") == "auto":
+        # Global batch size = micro_batch * accumulation * world_size
+        # But we can let DeepSpeed calculate it if we provide micro_batch and accumulation
+        del ds_config["train_batch_size"] 
+    
+    if ds_config.get("gradient_accumulation_steps") == "auto":
+        ds_config["gradient_accumulation_steps"] = 1
 
     model_engine, optimizer, _, scheduler = deepspeed.initialize(
         args=args,
         model=model,
         optimizer=optimizer,
         lr_scheduler=scheduler,
+        config_params=ds_config,  # Pass patched config dict
         dist_init_required=True
     )
     
