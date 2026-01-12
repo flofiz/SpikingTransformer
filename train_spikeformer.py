@@ -449,6 +449,12 @@ def train():
     # ============================================
     # DEEPSPEED INIT
     # ============================================
+    # Fix for DeepSpeed "auto" config support
+    if not hasattr(args, "per_device_train_batch_size"):
+        args.per_device_train_batch_size = BATCH_SIZE
+    if not hasattr(args, "gradient_accumulation_steps"):
+        args.gradient_accumulation_steps = 1
+
     model_engine, optimizer, _, scheduler = deepspeed.initialize(
         args=args,
         model=model,
