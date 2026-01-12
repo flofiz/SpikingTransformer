@@ -344,22 +344,22 @@ class LIF(nn.Module):
         # --- Paramètre Beta ---
         if learn_beta:
             # Paramètre apprenable (stocké en log-space pour stabilité)
-            self.beta_raw = nn.Parameter(torch.tensor(self._inverse_sigmoid(beta)))
+            self.beta_raw = nn.Parameter(torch.tensor([self._inverse_sigmoid(beta)]))
         else:
             # Paramètre fixe
-            self.register_buffer('beta', torch.tensor(beta))
+            self.register_buffer('beta', torch.tensor([beta]))
         
         # --- Paramètre v_th ---
         if learn_v_th:
-            self.v_th = nn.Parameter(torch.tensor(v_th))
+            self.v_th = nn.Parameter(torch.tensor([v_th]))
         else:
-            self.register_buffer('v_th', torch.tensor(v_th))
+            self.register_buffer('v_th', torch.tensor([v_th]))
             
         # --- Paramètre v_reset ---
         if learn_v_reset:
-            self.v_reset = nn.Parameter(torch.tensor(v_reset))
+            self.v_reset = nn.Parameter(torch.tensor([v_reset]))
         else:
-            self.register_buffer('v_reset', torch.tensor(v_reset))
+            self.register_buffer('v_reset', torch.tensor([v_reset]))
         
         # k_superspike reste toujours fixe (hyperparam du gradient)
         self.register_buffer('k_superspike', torch.tensor(k_superspike))
