@@ -16,7 +16,12 @@ from torch.utils.data import DataLoader
 # from torch.cuda.amp import autocast, GradScaler
 
 import torch.distributed as dist
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import (
+    FullyShardedDataParallel as FSDP,
+    MixedPrecision,
+    StateDictType,
+    FullStateDictConfig,
+)
 from torch.distributed.fsdp.fully_sharded_data_parallel import (
     CPUOffload,
     BackwardPrefetch,
@@ -96,7 +101,7 @@ def do_wandb_init_on_rank0(args, config_dict):
             project=args.wandb_project,
             name=args.wandb_run_name or f"spikeformer_{time.strftime('%Y%m%d_%H%M%S')}",
             config=config_dict,
-            tags=["spiking-transformer", "ocr", "deepspeed"],
+            tags=["spiking-transformer", "ocr", "fsdp"],
         )
         print(f"[WandB] Initialized: {wandb.run.url}")
     except Exception as e:
@@ -712,7 +717,7 @@ def train():
                         # Simple FSDP State Dictionary saving (Full State Dict)
                         # Warning: This gathers all weights to CPU/Rank 0.
                         # For very large models, use SHARDED_STATE_DICT.
-                        from torch.distributed.fsdp import StateDictType, FullStateDictConfig
+                        # (Imports moved to top)
                         save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
                         with FSDP.state_dict_type(model_engine, StateDictType.FULL_STATE_DICT, save_policy):
                             cpu_state = model_engine.state_dict()
