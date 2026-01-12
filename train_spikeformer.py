@@ -471,6 +471,9 @@ def train():
     if ds_config.get("gradient_accumulation_steps") == "auto":
         ds_config["gradient_accumulation_steps"] = 1
 
+    # Prevent conflict: DeepSpeed throws error if both config_params and args.deepspeed_config are set
+    args.deepspeed_config = None
+
     model_engine, optimizer, _, scheduler = deepspeed.initialize(
         args=args,
         model=model,
