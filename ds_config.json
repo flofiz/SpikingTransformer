@@ -21,9 +21,16 @@
     },
     "gradient_accumulation_steps": "auto",
     "gradient_clipping": "auto",
-    "train_batch_size": "auto",
     "train_micro_batch_size_per_gpu": "auto",
     "steps_per_print": 100,
     "wall_clock_breakdown": false,
-    "zero_allow_untested_optimizer": true
+    "zero_allow_untested_optimizer": true,
+    "activation_checkpointing": {
+        "partition_activations": true,
+        "cpu_checkpointing": true,
+        "contiguous_memory_optimization": true,
+        "number_checkpoints": null,
+        "synchronize_checkpoint_boundary": false,
+        "profile": false
+    }
 }

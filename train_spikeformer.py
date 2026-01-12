@@ -362,7 +362,7 @@ def train():
         train=True,
         max_samples=50_000_000,
         max_chars=MAX_CHARS,
-        cache_size=100,
+        cache_size=10000, # Increased for IO buffering (was 100)
         in_channels=IN_CHANNELS,
         sources=[("wikimedia/wikipedia", "20231101.fr", "Français")],
     )
