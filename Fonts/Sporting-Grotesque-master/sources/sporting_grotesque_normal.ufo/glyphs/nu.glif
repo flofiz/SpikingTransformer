@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<glyph name="nu" format="1">
+  <advance width="658"/>
+  <unicode hex="03BD"/>
+  <outline>
+    <contour>
+      <point x="529" y="555" type="line"/>
+      <point x="488" y="383"/>
+      <point x="414" y="219"/>
+      <point x="334" y="107" type="curve"/>
+      <point x="148" y="555" type="line"/>
+      <point x="10" y="555" type="line"/>
+      <point x="268" y="0" type="line"/>
+      <point x="374" y="0" type="line"/>
+      <point x="501" y="152"/>
+      <point x="596" y="345"/>
+      <point x="648" y="555" type="curve"/>
+    </contour>
+  </outline>
+  <lib>
+    <dict>
+      <key>com.schriftgestaltung.Glyphs.lastChange</key>
+      <string>2018-04-05 15:21:53 +0000</string>
+      <key>com.typemytype.robofont.mark</key>
+      <array>
+        <real>0.656</real>
+        <integer>1</integer>
+        <real>0.6</real>
+        <integer>1</integer>
+      </array>
+    </dict>
+  </lib>
+</glyph>

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<glyph name="z" format="1">
+  <advance width="705"/>
+  <unicode hex="007A"/>
+  <outline>
+    <contour>
+      <point x="60" y="0" type="line"/>
+      <point x="645" y="0" type="line"/>
+      <point x="645" y="97" type="line"/>
+      <point x="268" y="97" type="line"/>
+      <point x="645" y="448" type="line"/>
+      <point x="645" y="555" type="line"/>
+      <point x="60" y="555" type="line"/>
+      <point x="60" y="458" type="line"/>
+      <point x="443" y="458" type="line"/>
+      <point x="60" y="107" type="line"/>
+    </contour>
+  </outline>
+  <lib>
+    <dict>
+      <key>com.schriftgestaltung.Glyphs.lastChange</key>
+      <string>2018-04-05 15:27:41 +0000</string>
+      <key>com.typemytype.robofont.guides</key>
+      <array>
+        <dict>
+          <key>angle</key>
+          <integer>90</integer>
+          <key>isGlobal</key>
+          <false/>
+          <key>magnetic</key>
+          <integer>5</integer>
+          <key>x</key>
+          <integer>72</integer>
+          <key>y</key>
+          <integer>0</integer>
+        </dict>
+        <dict>
+          <key>angle</key>
+          <integer>90</integer>
+          <key>isGlobal</key>
+          <false/>
+          <key>magnetic</key>
+          <integer>5</integer>
+          <key>x</key>
+          <integer>655</integer>
+          <key>y</key>
+          <integer>0</integer>
+        </dict>
+      </array>
+    </dict>
+  </lib>
+</glyph>

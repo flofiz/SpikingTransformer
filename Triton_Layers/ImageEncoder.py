@@ -62,18 +62,52 @@ class RPE2D(nn.Module):
 
 
 class CNNBackbone(nn.Module):
-    def __init__(self, d_model=512, nb_layers=11, patch_size=4, n_steps=1, threshold=0.5):
+    """
+    CNN Backbone for image feature extraction using Spiking Neural Networks.
+    
+    Args:
+        d_model: Output model dimension
+        nb_layers: Number of FusedInvertedBottleneck layers
+        patch_size: Patch size for PixelUnshuffle (space-to-depth)
+        n_steps: Number of SNN timesteps
+        threshold: LIF neuron threshold
+        in_channels: Number of input channels (1 for grayscale, 3 for RGB)
+    """
+    def __init__(
+        self,
+        d_model: int = 512,
+        nb_layers: int = 11,
+        patch_size: int = 4,
+        n_steps: int = 1,
+        threshold: float = 0.5,
+        in_channels: int = 1
+    ):
         super().__init__()
         self.nb_layers = nb_layers
         self.d_model = d_model
-        self.layers = nn.ModuleList([FusedInvertedBottleneck(n_steps=n_steps, threshold=threshold) for _ in range(nb_layers)])
+        self.in_channels = in_channels
+        self.patch_size = patch_size
+        
+        # Calculate channels after PixelUnshuffle
+        # For grayscale (1 channel): 1 * 16 = 16
+        # For RGB (3 channels): 3 * 16 = 48
+        unshuffle_channels = in_channels * (patch_size ** 2)
+        
+        self.layers = nn.ModuleList([
+            FusedInvertedBottleneck(n_steps=n_steps, threshold=threshold) 
+            for _ in range(nb_layers)
+        ])
         self.space_to_depth = nn.PixelUnshuffle(patch_size)
-        self.conv1 = nn.Conv2d(16, 128, kernel_size=3, stride=1, padding=1)
+        
+        # First conv adapts to input channels after unshuffle
+        self.conv1 = nn.Conv2d(unshuffle_channels, 128, kernel_size=3, stride=1, padding=1)
         self.bn1 = nn.BatchNorm2d(128)
         self.lif_1 = LIF(n_steps=n_steps, beta=0.5)
+        
         self.conv2 = nn.Conv2d(128, 64, kernel_size=1, stride=1, padding=0)
         self.bn2 = nn.BatchNorm2d(64)
         self.lif_2 = LIF(n_steps=n_steps, beta=0.5)
+        
         self.reduce = ReduceConvBlock(64, d_model, n_steps=n_steps, threshold=threshold)
         self.rpe = RPE2D(d_model, n_steps=n_steps, threshold=threshold)
 

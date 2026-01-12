@@ -5,6 +5,7 @@ import logging
 from typing import List, Optional, Tuple, Union, Dict, Any
 from itertools import cycle
 from threading import Lock
+from pathlib import Path
 
 import torch
 from torch.utils.data import IterableDataset
@@ -20,8 +21,291 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+# ============================================
+# FONT POOL SYSTEM
+# ============================================
+
+# Global font pool cache
+_FONT_POOL_CACHE: Optional[List[str]] = None
+_FONT_POOL_LOCK = Lock()
+
+# Test characters for font validation (covers Latin alphabet + accents + numbers)
+FONT_TEST_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789éèêëàâäùûüôöîïçÉÈÊËÀÂÄÙÛÜÔÖÎÏÇ"
+
+# Default cache file path
+DEFAULT_FONT_CACHE = "valid_fonts.json"
+
+
+def _validate_single_font(args) -> Tuple[str, bool]:
+    """Worker function for parallel font validation."""
+    font_path, test_chars, test_size = args
+    try:
+        font = ImageFont.truetype(font_path, size=test_size)
+        test_img = Image.new('L', (200, 50), color=255)
+        draw = ImageDraw.Draw(test_img)
+        
+        try:
+            bbox = font.getbbox(test_chars[:20])
+            if bbox and (bbox[2] - bbox[0]) > 0 and (bbox[3] - bbox[1]) > 0:
+                return (font_path, True)
+            return (font_path, False)
+        except Exception:
+            draw.text((5, 5), "Test ABC 123", fill=0, font=font)
+            return (font_path, True)
+    except Exception:
+        return (font_path, False)
+
+
+def scan_fonts_parallel(
+    font_dirs: List[str],
+    test_chars: str = FONT_TEST_CHARS,
+    test_size: int = 28,
+    num_workers: int = 8,
+    validate: bool = True,
+    verbose: bool = True
+) -> List[str]:
+    """
+    Scans font directories in parallel and returns valid font paths.
+    
+    Args:
+        font_dirs: List of directory paths to scan
+        test_chars: Characters to test for rendering validation
+        test_size: Font size for testing
+        num_workers: Number of parallel workers for validation
+        validate: If False, skip validation and just list font files (faster)
+        verbose: Whether to log progress
+        
+    Returns:
+        List of valid font file paths
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import time
+    
+    # Step 1: Collect all font files
+    font_files = []
+    for font_dir in font_dirs:
+        if not os.path.exists(font_dir):
+            if verbose:
+                logger.warning(f"[FontPool] Directory not found: {font_dir}")
+            continue
+            
+        for root, dirs, files in os.walk(font_dir):
+            for file in files:
+                ext = file.lower()
+                if ext.endswith('.ttf') or ext.endswith('.otf'):
+                    font_files.append(os.path.join(root, file))
+    
+    if verbose:
+        logger.info(f"[FontPool] Found {len(font_files)} font files")
+    
+    if not font_files:
+        return []
+    
+    # Step 2: Skip validation if requested
+    if not validate:
+        if verbose:
+            logger.info(f"[FontPool] Skipping validation (quick mode)")
+        return font_files
+    
+    # Step 3: Parallel validation
+    if verbose:
+        logger.info(f"[FontPool] Validating fonts with {num_workers} workers...")
+    
+    valid_fonts = []
+    start_time = time.time()
+    
+    args_list = [(path, test_chars, test_size) for path in font_files]
+    
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = {executor.submit(_validate_single_font, args): args[0] for args in args_list}
+        
+        completed = 0
+        for future in as_completed(futures):
+            path, is_valid = future.result()
+            if is_valid:
+                valid_fonts.append(path)
+            completed += 1
+            
+            # Progress update every 500 fonts
+            if verbose and completed % 500 == 0:
+                elapsed = time.time() - start_time
+                rate = completed / elapsed if elapsed > 0 else 0
+                logger.info(f"[FontPool] Progress: {completed}/{len(font_files)} ({rate:.0f} fonts/s)")
+    
+    if verbose:
+        elapsed = time.time() - start_time
+        logger.info(f"[FontPool] Validated {len(valid_fonts)}/{len(font_files)} fonts in {elapsed:.1f}s")
+    
+    return valid_fonts
+
+
+def scan_fonts(
+    font_dirs: List[str],
+    test_chars: str = FONT_TEST_CHARS,
+    test_size: int = 28,
+    verbose: bool = True
+) -> List[str]:
+    """
+    Scans font directories (legacy single-threaded version).
+    Use scan_fonts_parallel() for faster scanning.
+    """
+    return scan_fonts_parallel(
+        font_dirs, 
+        test_chars=test_chars, 
+        test_size=test_size, 
+        num_workers=1,
+        validate=True,
+        verbose=verbose
+    )
+
+
+def load_font_cache(cache_path: str = DEFAULT_FONT_CACHE) -> Optional[List[str]]:
+    """
+    Loads font list from JSON cache file.
+    
+    Args:
+        cache_path: Path to the cache JSON file
+        
+    Returns:
+        List of font paths or None if cache not found/invalid
+    """
+    import json
+    
+    if not os.path.exists(cache_path):
+        return None
+    
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        
+        fonts = data.get("fonts", [])
+        # Validate that fonts still exist
+        valid = [f for f in fonts if os.path.exists(f)]
+        
+        if len(valid) < len(fonts) * 0.9:  # If more than 10% missing, invalidate cache
+            logger.warning(f"[FontPool] Cache invalid: {len(fonts) - len(valid)} fonts missing")
+            return None
+        
+        logger.info(f"[FontPool] Loaded {len(valid)} fonts from cache: {cache_path}")
+        return valid
+        
+    except Exception as e:
+        logger.warning(f"[FontPool] Failed to load cache: {e}")
+        return None
+
+
+def get_font_pool(
+    force_refresh: bool = False,
+    use_cache: bool = True,
+    validate: bool = False,  # Default: skip validation for speed
+    num_workers: int = 8
+) -> List[str]:
+    """
+    Returns the global font pool, initializing it if necessary.
+    Thread-safe singleton pattern.
+    
+    Args:
+        force_refresh: If True, rescans font directories (ignores cache)
+        use_cache: If True, try to load from valid_fonts.json first
+        validate: If True, validate each font during scanning (slow but safe)
+        num_workers: Number of parallel workers for validation
+        
+    Returns:
+        List of valid font file paths
+    """
+    global _FONT_POOL_CACHE
+    
+    with _FONT_POOL_LOCK:
+        if _FONT_POOL_CACHE is not None and not force_refresh:
+            return _FONT_POOL_CACHE
+        
+        base_path = Path(__file__).parent
+        cache_path = str(base_path / DEFAULT_FONT_CACHE)
+        
+        # Try loading from cache first
+        if use_cache and not force_refresh:
+            cached = load_font_cache(cache_path)
+            if cached:
+                _FONT_POOL_CACHE = cached
+                return _FONT_POOL_CACHE
+        
+        # Scan font directories
+        font_dirs = [
+            str(base_path / "Fonts"),
+            str(base_path / "fonts_HW"),
+        ]
+        
+        logger.info("[FontPool] Initializing font pool...")
+        _FONT_POOL_CACHE = scan_fonts_parallel(
+            font_dirs,
+            num_workers=num_workers,
+            validate=validate,
+            verbose=True
+        )
+        
+        if not _FONT_POOL_CACHE:
+            logger.warning("[FontPool] No fonts found! Using system fallback")
+            _FONT_POOL_CACHE = [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "C:/Windows/Fonts/arial.ttf",
+                "C:/Windows/Fonts/times.ttf",
+            ]
+            _FONT_POOL_CACHE = [f for f in _FONT_POOL_CACHE if os.path.exists(f)]
+    
+    return _FONT_POOL_CACHE
+
+
+def get_random_font(size: int = 28, pool: Optional[List[str]] = None) -> ImageFont.FreeTypeFont:
+    """
+    Returns a random font from the pool.
+    
+    Args:
+        size: Font size
+        pool: Optional custom font pool; uses global pool if None
+        
+    Returns:
+        ImageFont.FreeTypeFont object
+    """
+    if pool is None:
+        pool = get_font_pool()
+    
+    if not pool:
+        return ImageFont.load_default()
+    
+    # Random selection
+    font_path = random.choice(pool)
+    
+    try:
+        return ImageFont.truetype(font_path, size=size)
+    except Exception:
+        # If selected font fails, try another
+        for _ in range(3):  # Try up to 3 times
+            font_path = random.choice(pool)
+            try:
+                return ImageFont.truetype(font_path, size=size)
+            except Exception:
+                continue
+        return ImageFont.load_default()
+
+
 def _find_font(candidates: Optional[List[str]] = None, size: int = 28) -> ImageFont.FreeTypeFont:
-    """Trouve une police disponible sur le système."""
+    """
+    Finds an available font. Now uses font pool by default.
+    
+    Args:
+        candidates: Optional list of font paths to try first
+        size: Font size
+        
+    Returns:
+        ImageFont.FreeTypeFont object
+    """
+    # Try font pool first if no specific candidates
+    pool = get_font_pool()
+    if pool and candidates is None:
+        return get_random_font(size=size, pool=pool)
+    
+    # Legacy behavior: try specific candidates
     if candidates is None:
         candidates = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
@@ -30,13 +314,17 @@ def _find_font(candidates: Optional[List[str]] = None, size: int = 28) -> ImageF
             "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
             "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
             "/Library/Fonts/Arial.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+            "C:/Windows/Fonts/times.ttf",
         ]
+    
     for fp in candidates:
         if os.path.exists(fp):
             try:
                 return ImageFont.truetype(fp, size=size)
             except Exception:
                 pass
+    
     return ImageFont.load_default()
 
 
@@ -126,21 +414,40 @@ def _draw_text_to_image(
     font_candidates: Optional[List[str]] = None,
     jitter_font: Tuple[int, int] = (-6, 6),
     train: bool = True,
+    output_mode: str = "L",  # "L" for grayscale, "RGB" for 3-channel
 ) -> Image.Image:
-    """Génère une image à partir de texte."""
+    """
+    Generates an image from text with random font selection.
+    
+    Args:
+        text: Text to render
+        img_size: Target image size (H, W)
+        margin: Margin around text
+        base_font_size: Base font size
+        font_candidates: Optional specific font paths to use
+        jitter_font: Font size jitter range for training
+        train: Whether in training mode (enables jitter)
+        output_mode: "L" for grayscale, "RGB" for 3-channel output
+        
+    Returns:
+        PIL Image in the specified mode
+    """
     bg_color = 255
     fg_color = 0
 
+    # Font size jitter during training
     font_size = base_font_size
+    if train and jitter_font[0] != jitter_font[1]:
+        font_size = base_font_size + random.randint(jitter_font[0], jitter_font[1])
+    
     font = _find_font(font_candidates, size=font_size)
 
     line_text = " ".join(text.split())
 
-    # Optimisation: utilise font.getbbox si disponible (PIL >= 8.0.0)
+    # Get text dimensions
     try:
         bbox = font.getbbox(line_text) if line_text else (0, 0, 0, 0)
     except AttributeError:
-        # Fallback pour anciennes versions
         tmp_img = Image.new("L", (1, 1), color=bg_color)
         tmp_draw = ImageDraw.Draw(tmp_img)
         bbox = tmp_draw.textbbox((0, 0), line_text, font=font) if line_text else (0, 0, 0, 0)
@@ -162,11 +469,15 @@ def _draw_text_to_image(
     W = int(text_w + 2 * margin)
     H = int(text_h + 2 * margin)
 
+    # Create image in grayscale first (for text rendering)
     img = Image.new("L", (W, H), color=bg_color)
     draw = ImageDraw.Draw(img)
     draw.text((margin, margin), line_text, fill=fg_color, font=font)
 
-    # Garde en niveaux de gris (pas de conversion RGB)
+    # Convert to RGB if requested (replicate single channel)
+    if output_mode == "RGB":
+        img = img.convert("RGB")
+    
     return img
 
 
@@ -179,22 +490,37 @@ def pil_to_tensor_resize_pad(
     std: Tuple[float, ...] = (0.5,),
     resample=Image.BILINEAR,
     return_mask: bool = False,
+    in_channels: int = 1,  # 1 for grayscale, 3 for RGB
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     """
-    Redimensionne et pad une image en tensor.
-    Optimisé pour images en niveaux de gris (1 canal).
+    Resizes and pads an image to a tensor.
+    
+    Args:
+        img: PIL Image
+        target_size: Target size (H, W) or int for square
+        pad_value: Padding value (0 or 1)
+        normalize: Whether to normalize
+        mean: Normalization mean
+        std: Normalization std
+        resample: Resampling method
+        return_mask: Whether to return attention mask
+        in_channels: Number of output channels (1 for grayscale, 3 for RGB)
+        
+    Returns:
+        Tensor of shape (C, H, W) and optionally mask
     """
     if pad_value not in (0, 1):
-        raise ValueError("pad_value doit être 0 ou 1")
+        raise ValueError("pad_value must be 0 or 1")
 
     if isinstance(target_size, int):
         target_h = target_w = int(target_size)
     else:
         target_h, target_w = target_size
 
-    # Force niveaux de gris
-    if img.mode != "L":
-        img = img.convert("L")
+    # Convert to target mode
+    target_mode = "RGB" if in_channels == 3 else "L"
+    if img.mode != target_mode:
+        img = img.convert(target_mode)
 
     orig_w, orig_h = img.size
     scale = min(target_w / orig_w, target_h / orig_h)
@@ -203,7 +529,7 @@ def pil_to_tensor_resize_pad(
 
     resized = img.resize((new_w, new_h), resample=resample)
 
-    tensor = TF.to_tensor(resized)  # Forme (1, new_h, new_w)
+    tensor = TF.to_tensor(resized)  # Shape: (C, new_h, new_w)
     mask = torch.ones((new_h, new_w), dtype=torch.float32)
 
     pad_w = target_w - new_w
@@ -219,18 +545,22 @@ def pil_to_tensor_resize_pad(
         pad_top = pad_h // 2
         pad_bottom = pad_h - pad_top
         
-        # Padding: (left, right, top, bottom) pour F.pad
+        # Padding: (left, right, top, bottom) for F.pad
         pad_tuple = (pad_left, pad_right, pad_top, pad_bottom)
         
         if any(p > 0 for p in pad_tuple):
             tensor = F.pad(tensor, pad_tuple, mode="constant", value=float(pad_value))
             
-            # Padding du masque avec la même convention
+            # Padding the mask with same convention
             mask = mask.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
             mask = F.pad(mask, pad_tuple, mode="constant", value=0.0)
-            mask = mask.squeeze(0).squeeze(0)  # Retour à (H, W)
+            mask = mask.squeeze(0).squeeze(0)  # Back to (H, W)
 
     if normalize:
+        # Adjust mean/std for number of channels
+        if in_channels == 3 and len(mean) == 1:
+            mean = mean * 3
+            std = std * 3
         tensor = TF.normalize(tensor, mean=list(mean), std=list(std))
 
     return (tensor, mask) if return_mask else tensor
@@ -340,6 +670,7 @@ class MultiSourceTextDataset(IterableDataset):
         article_rotation_interval: int = 1000,
         enable_all_wikipedia: bool = False,
         enable_extended_sources: bool = False,
+        in_channels: int = 1,  # 1 for grayscale, 3 for RGB
     ):
         super().__init__()
         assert split in ("train", "test")
@@ -358,6 +689,7 @@ class MultiSourceTextDataset(IterableDataset):
         self.test_size = test_size
         self.cache_size = cache_size
         self.article_rotation_interval = article_rotation_interval
+        self.in_channels = in_channels  # Added: RGB or grayscale
 
         # Configuration des sources
         if sources is None:
@@ -579,13 +911,15 @@ class MultiSourceTextDataset(IterableDataset):
         while True:
             text = self._get_text()
 
-            # Génère l'image (niveaux de gris)
+            # Génère l'image (grayscale or RGB based on in_channels)
+            output_mode = "RGB" if self.in_channels == 3 else "L"
             img = _draw_text_to_image(
                 text=text,
                 img_size=self.img_size,
                 base_font_size=self.base_font_size,
                 font_candidates=self.font_candidates,
                 train=self.train,
+                output_mode=output_mode,
             )
             img = self.post_color_aug(img)
 
@@ -595,22 +929,16 @@ class MultiSourceTextDataset(IterableDataset):
                 target_size=self.img_size, 
                 pad_value=0, 
                 normalize=False, 
-                return_mask=True
+                return_mask=True,
+                in_channels=self.in_channels,
             )
 
             # Tokenisation déplacée dans le collator
-            # labels = self.processor.tokenizer(
-            #     text, 
-            #     padding="max_length", 
-            #     max_length=self.max_target_length, 
-            #     truncation=True
-            # ).input_ids
 
             yield {
-                "pixel_values": pixel_values,  # (1, H, W) - niveaux de gris
+                "pixel_values": pixel_values,  # (C, H, W) - C=1 or 3
                 "pixel_mask": pixel_mask,       # (H, W)
                 "text_label": text,             # Texte brut pour le collator
-                # "labels": torch.tensor(labels, dtype=torch.long),
             }
 
 
@@ -646,6 +974,7 @@ class WikiTextImageDataset(torch.utils.data.Dataset):
         enable_all_wikipedia: bool = False,
         enable_extended_sources: bool = False,
         sources: Optional[List[Tuple[str, Optional[str], str]]] = None,
+        in_channels: int = 1,  # 1 for grayscale, 3 for RGB
     ):
         super().__init__()
         
@@ -661,6 +990,7 @@ class WikiTextImageDataset(torch.utils.data.Dataset):
         self.seed = seed
         self.split = split
         self._max_samples = max_samples
+        self.in_channels = in_channels  # Added: RGB or grayscale
         
         # Configuration des sources
         if sources is None:
@@ -948,12 +1278,15 @@ class WikiTextImageDataset(torch.utils.data.Dataset):
             text = self._get_text()
             random.setstate(old_state)
         
+        # Generate image (grayscale or RGB based on in_channels)
+        output_mode = "RGB" if self.in_channels == 3 else "L"
         img = _draw_text_to_image(
             text=text,
             img_size=self.img_size,
             base_font_size=self.base_font_size,
             font_candidates=self.font_candidates,
             train=self.train,
+            output_mode=output_mode,
         )
         img = self.post_color_aug(img)
 
@@ -962,20 +1295,12 @@ class WikiTextImageDataset(torch.utils.data.Dataset):
             target_size=self.img_size, 
             pad_value=0, 
             normalize=False, 
-            return_mask=True
+            return_mask=True,
+            in_channels=self.in_channels,
         )
 
-        # Tokenisation déplacée dans le collator
-        # labels = self.processor.tokenizer(
-        #     text, 
-        #     padding="max_length", 
-        #     max_length=self.max_target_length, 
-        #     truncation=True
-        # ).input_ids
-
         return {
-            "pixel_values": pixel_values,  # (1, H, W) - niveaux de gris
+            "pixel_values": pixel_values,  # (C, H, W) - C=1 or 3
             "pixel_mask": pixel_mask,       # (H, W)
             "text_label": text,             # Texte brut pour le collator
-            # "labels": torch.tensor(labels, dtype=torch.long),
         }

@@ -4,6 +4,7 @@
 checkpoints/
 Triton_Layers/Lif_bcp.py
 notebook.ipynb
+wandb_key.txt
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<glyph name="bracketleft" format="1">
+  <advance width="333"/>
+  <unicode hex="005B"/>
+  <outline>
+    <contour>
+      <point x="313" y="-129" type="line" name="hr00"/>
+      <point x="110" y="-129" type="line"/>
+      <point x="110" y="768" type="line"/>
+      <point x="313" y="768" type="line"/>
+      <point x="313" y="818" type="line"/>
+      <point x="60" y="818" type="line"/>
+      <point x="60" y="-179" type="line"/>
+      <point x="313" y="-179" type="line"/>
+    </contour>
+  </outline>
+  <lib>
+    <dict>
+      <key>com.adobe.type.autohint</key>
+      <data>
+        ICA8aGludFNldExpc3Q+CiAgICA8aGludHNldCBwb2ludFRhZz0iaHIwMCI+
+        CiAgICAgIDxoc3RlbSBwb3M9Ii0xNzkiIHdpZHRoPSI5NCIgLz4KICAgICAg
+        PGhzdGVtIHBvcz0iNzI1IiB3aWR0aD0iOTMiIC8+CiAgICAgIDx2c3RlbSBw
+        b3M9IjYwIiB3aWR0aD0iMTAyIiAvPgogICAgPC9oaW50c2V0PgogIDwvaGlu
+        dFNldExpc3Q+Cg==
+      </data>
+      <key>com.schriftgestaltung.Glyphs.lastChange</key>
+      <string>2018-04-05 15:21:53 +0000</string>
+      <key>com.typemytype.robofont.mark</key>
+      <array>
+        <real>0.6</real>
+        <real>0.609</real>
+        <integer>1</integer>
+        <integer>1</integer>
+      </array>
+    </dict>
+  </lib>
+</glyph>

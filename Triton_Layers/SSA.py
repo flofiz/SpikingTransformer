@@ -3,8 +3,9 @@ import triton
 import triton.language as tl
 from .Lif import LIF
 import torch.nn as nn
+import torch.nn.functional as F
 import math
-from typing import Optional
+from typing import Optional, List, Literal
 
 
 class SSAMultiHeadAttention_(nn.Module):
@@ -21,13 +22,15 @@ class SSAMultiHeadAttention_(nn.Module):
         learnable_alpha: bool = False,
         dropout: float = 0.0,
         n_steps: int = 1,
-        bias: bool = True
+        bias: bool = True,
+        mask_mode: Literal["multiply", "additive"] = "multiply"
     ):
         super().__init__()
         
         self.d_model = d_model
         self.n_heads = n_heads
         self.d_head = d_model // n_heads
+        self.mask_mode = mask_mode
         
         self.q_proj = nn.Linear(d_model, d_model, bias=bias)
         self.k_proj = nn.Linear(d_model, d_model, bias=bias)
@@ -80,7 +83,10 @@ class SSAMultiHeadAttention_(nn.Module):
 
         attn_output = (Q @ K.transpose(-2, -1))
         if attention_mask is not None:
-            attn_output = attn_output * attention_mask
+            if self.mask_mode == "multiply":
+                attn_output = attn_output * attention_mask
+            elif self.mask_mode == "additive":
+                attn_output = attn_output.masked_fill(attention_mask == 0, float('-inf'))
         attn_output = (attn_output @ V)* 0.125
 
         attn_output, _ = self.lifs(attn_output)
@@ -96,13 +102,15 @@ class SSAMultiHeadAttention_(nn.Module):
         return (
             f'd_model={self.d_model}, '
             f'n_heads={self.n_heads}, '
-            f'd_head={self.d_head}'
+            f'd_head={self.d_head}, '
+            f'mask_mode={self.mask_mode}'
         )
 
 
 class SSAMultiHeadAttention(nn.Module):
     """
-    [Documentation inchangée...]
+    Spiking Self-Attention with XNOR attention and Log Positional Encoding.
+    Supports configurable mask mode (multiply or additive).
     """
     
     def __init__(
@@ -114,11 +122,14 @@ class SSAMultiHeadAttention(nn.Module):
         learnable_alpha: bool = False,
         dropout: float = 0.0,
         n_steps: int = 1,
-        bias: bool = True
+        bias: bool = True,
+        mask_mode: Literal["multiply", "additive"] = "multiply"
     ):
         super().__init__()
 
-        self.scale = nn.Parameter(torch.sqrt(torch.tensor(1.0 / (d_model // n_heads))), requires_grad=True)
+        # Scale initialized to smaller value as per paper recommendation
+        self.scale = nn.Parameter(torch.tensor(0.05), requires_grad=True)
+        self.mask_mode = mask_mode
         
         self.d_model = d_model
         self.n_heads = n_heads
@@ -237,9 +248,14 @@ class SSAMultiHeadAttention(nn.Module):
         # Broadcast sur batch et heads: (L, L) -> (1, 1, L, L)
         log_bias = log_bias.unsqueeze(0).unsqueeze(0)
         attn_output = attn_output + log_bias  # (B, n_heads, L, L)
+        
         if attention_mask is not None:
-            attn_output = attn_output * attention_mask
-        attn_output = (attn_output *self.scale)@ V
+            if self.mask_mode == "multiply":
+                attn_output = attn_output * attention_mask
+            elif self.mask_mode == "additive":
+                attn_output = attn_output.masked_fill(attention_mask == 0, float('-inf'))
+        
+        attn_output = (attn_output * self.scale) @ V
 
         attn_output, _ = self.lifs(attn_output)
         attn_output = attn_output.transpose(1, 2).contiguous().view(B, N, D)
@@ -254,5 +270,111 @@ class SSAMultiHeadAttention(nn.Module):
         return (
             f'd_model={self.d_model}, '
             f'n_heads={self.n_heads}, '
-            f'd_head={self.d_head}'
+            f'd_head={self.d_head}, '
+            f'mask_mode={self.mask_mode}'
+        )
+
+
+class MultiScaleXNORAttention(nn.Module):
+    """
+    Multi-Scale Spiking Self-Attention (MSSA) adapted with XNOR attention and LogPE.
+    Inspired by MSViT paper: each head operates at a different scale via pooling/upsampling.
+    This enriches the receptive field by capturing both global and local features.
+    
+    Args:
+        d_model: Model dimension
+        n_heads: Total number of attention heads
+        scales: List of scales to use (e.g., [1, 2, 4] means downsample by 1x, 2x, 4x)
+        n_steps: Number of SNN timesteps
+        mask_mode: "multiply" or "additive" for causal masking
+    """
+    
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        scales: List[int] = [1, 2, 4],
+        n_steps: int = 1,
+        dropout: float = 0.0,
+        alpha: Optional[float] = None,
+        mask_mode: Literal["multiply", "additive"] = "multiply"
+    ):
+        super().__init__()
+        self.scales = scales
+        self.n_heads = n_heads
+        self.d_model = d_model
+        self.mask_mode = mask_mode
+        
+        # Distribute heads across scales
+        self.heads_per_scale = n_heads // len(scales)
+        assert n_heads % len(scales) == 0, f"n_heads ({n_heads}) must be divisible by number of scales ({len(scales)})"
+        
+        # One XNOR attention per scale
+        self.attention_heads = nn.ModuleList([
+            SSAMultiHeadAttention(
+                d_model=d_model,
+                n_heads=self.heads_per_scale,
+                n_steps=n_steps,
+                dropout=dropout,
+                mask_mode=mask_mode
+            )
+            for _ in scales
+        ])
+        
+        # Fusion projection
+        self.fusion = nn.Linear(d_model * len(scales), d_model)
+        self.fusion_ln = nn.LayerNorm(d_model)
+        self.fusion_lif = LIF(n_steps=n_steps)
+    
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
+        value: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        if key is None:
+            key = query
+        if value is None:
+            value = query
+            
+        B, N, D = query.shape
+        outputs = []
+        
+        for scale, attn in zip(self.scales, self.attention_heads):
+            if scale > 1:
+                # Downsample -> Attention -> Upsample
+                # Use avg pooling on sequence dimension
+                q_scaled = F.avg_pool1d(query.transpose(1, 2), scale, stride=scale).transpose(1, 2)
+                k_scaled = F.avg_pool1d(key.transpose(1, 2), scale, stride=scale).transpose(1, 2)
+                v_scaled = F.avg_pool1d(value.transpose(1, 2), scale, stride=scale).transpose(1, 2)
+                
+                # No mask for scaled attention (global context)
+                out = attn(q_scaled, k_scaled, v_scaled, attention_mask=None)
+                
+                # Upsample back to original sequence length
+                out = F.interpolate(out.transpose(1, 2), size=N, mode='linear', align_corners=False).transpose(1, 2)
+            else:
+                # Scale 1: standard attention with mask
+                out = attn(query, key, value, attention_mask=attention_mask)
+            
+            outputs.append(out)
+        
+        # Concatenate outputs from all scales
+        fused = torch.cat(outputs, dim=-1)  # (B, N, D * num_scales)
+        
+        # Fusion projection
+        fused = self.fusion(fused)
+        fused = self.fusion_ln(fused)
+        fused, _ = self.fusion_lif(fused)
+        
+        return fused
+    
+    def extra_repr(self) -> str:
+        return (
+            f'd_model={self.d_model}, '
+            f'n_heads={self.n_heads}, '
+            f'scales={self.scales}, '
+            f'heads_per_scale={self.heads_per_scale}, '
+            f'mask_mode={self.mask_mode}'
         )

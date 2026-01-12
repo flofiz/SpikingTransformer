@@ -5,6 +5,7 @@ from .Decoder import Decoder
 from .ImageEncoder import CNNBackbone
 from .Lif import LIF
 import math
+from typing import Literal, List, Optional
 
 from torch import Tensor
 
@@ -40,27 +41,50 @@ class Seq2Seq(nn.Module):
     """
     Sequence-to-Sequence model with Spiking Encoder and Decoder.
     Accepts inputs of shape [T, B, C, H, W] and outputs shape [T, B, N, D].
+    
+    Args:
+        patch_size: Patch size for image encoder
+        d_model: Model dimension
+        n_heads: Number of attention heads
+        ff_dim: Feed-forward hidden dimension
+        num_encoder_layers: Number of encoder layers
+        num_decoder_layers: Number of decoder layers
+        dropout: Dropout rate
+        alpha: Alpha parameter for attention
+        tgt_vocab_size: Target vocabulary size
+        nb_sps_blocks: Number of SPS blocks in image encoder
+        n_steps: Number of SNN timesteps
+        mask_mode: "multiply" or "additive" for causal masking
+        use_mssa: If True, use Multi-Scale Spiking Attention
+        mssa_scales: Scales for MSSA
+        in_channels: Number of input channels (1 for grayscale, 3 for RGB)
     """
     def __init__(self,
-                 patch_size=16,
-                 d_model=512,
-                 n_heads=8,
-                 ff_dim=2048,
-                 num_encoder_layers=6,
-                 num_decoder_layers=6,
-                 dropout=0.1,
-                 alpha=0.125,
-                 tgt_vocab_size=1000,
-                 nb_sps_blocks=4,
-                 n_steps=10):
+                 patch_size: int = 16,
+                 d_model: int = 512,
+                 n_heads: int = 8,
+                 ff_dim: int = 2048,
+                 num_encoder_layers: int = 6,
+                 num_decoder_layers: int = 6,
+                 dropout: float = 0.1,
+                 alpha: float = 0.125,
+                 tgt_vocab_size: int = 1000,
+                 nb_sps_blocks: int = 4,
+                 n_steps: int = 10,
+                 mask_mode: Literal["multiply", "additive"] = "multiply",
+                 use_mssa: bool = False,
+                 mssa_scales: List[int] = [1, 2, 4],
+                 in_channels: int = 1):
         super().__init__()
         self.n_steps = n_steps
+        self.mask_mode = mask_mode
         
         self.image_encoder = CNNBackbone(
             nb_layers=nb_sps_blocks,
             patch_size=patch_size,
             d_model=d_model,
-            n_steps=n_steps
+            n_steps=n_steps,
+            in_channels=in_channels
         )
         
         self.encoder = Encoder(
@@ -70,7 +94,10 @@ class Seq2Seq(nn.Module):
             ff_dim=ff_dim,
             dropout=dropout,
             alpha=alpha,
-            n_steps=n_steps
+            n_steps=n_steps,
+            mask_mode=mask_mode,
+            use_mssa=use_mssa,
+            mssa_scales=mssa_scales
         )
         
         self.decoder = Decoder(
@@ -80,9 +107,12 @@ class Seq2Seq(nn.Module):
             ff_dim=ff_dim,
             dropout=dropout,
             alpha=alpha,
-            n_steps=n_steps
+            n_steps=n_steps,
+            mask_mode=mask_mode,
+            use_mssa=use_mssa,
+            mssa_scales=mssa_scales
         )
-        self.output_layer = nn.Linear(d_model, tgt_vocab_size)  # Example output layer
+        self.output_layer = nn.Linear(d_model, tgt_vocab_size)
         self.lifPE = LIF(n_steps=n_steps)
         self.tgt_tok_emb = TokenEmbedding(tgt_vocab_size, d_model)
         self.positional_encoding = PositionalEncoding(d_model, dropout=dropout)
@@ -92,7 +122,6 @@ class Seq2Seq(nn.Module):
         # tgt: [B, N, D]
         enc_output, _ = self.encode(src)  # [T*B, N, D]
         output = self.decode(tgt, enc_output, look_ahead_mask, enc_padding_mask, dec_padding_mask)  # [T*B, N, D] -> [T, B, N, D]
-        # output = self.decode(tgt, tgt)  # [T*B, N, D] -> [T, B, N, D]
         return output
 
     def encode(self, src: Tensor):
@@ -107,7 +136,6 @@ class Seq2Seq(nn.Module):
         if look_ahead_mask is not None:
             look_ahead_mask = look_ahead_mask.unsqueeze(0).repeat(self.n_steps, 1, 1, 1, 1).reshape(self.n_steps*look_ahead_mask.shape[0], look_ahead_mask.shape[1], look_ahead_mask.shape[2], look_ahead_mask.shape[3])  # [T*B, 1, N, N]
         tgt = self.positional_encoding(self.tgt_tok_emb(tgt))
-        # look_ahead_mask= None
         B, N, D = tgt.shape
         T = self.n_steps
         tgt = tgt.unsqueeze(0).expand(T, B, N, D).reshape(T*B, N, D)  # [T*B, N, D]
