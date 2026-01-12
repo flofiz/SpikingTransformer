@@ -342,7 +342,7 @@ class MultiScaleXNORAttention(nn.Module):
         outputs = []
         
         for scale, attn in zip(self.scales, self.attention_heads):
-            if scale > 1:
+            if scale > 1 and N >= scale:
                 # Downsample -> Attention -> Upsample
                 # Use avg pooling on sequence dimension
                 q_scaled = F.avg_pool1d(query.transpose(1, 2), scale, stride=scale).transpose(1, 2)
@@ -355,7 +355,8 @@ class MultiScaleXNORAttention(nn.Module):
                 # Upsample back to original sequence length
                 out = F.interpolate(out.transpose(1, 2), size=N, mode='linear', align_corners=False).transpose(1, 2)
             else:
-                # Scale 1: standard attention with mask
+                # Scale 1 OR sequence too short: standard attention
+                # Note: For greedy decoding (N=1), we can't downsample, so we use full resolution
                 out = attn(query, key, value, attention_mask=attention_mask)
             
             outputs.append(out)

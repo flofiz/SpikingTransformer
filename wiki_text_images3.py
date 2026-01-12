@@ -2,6 +2,7 @@ import os
 import re
 import random
 import logging
+import multiprocessing  # Added for worker detection
 from typing import List, Optional, Tuple, Union, Dict, Any
 from itertools import cycle
 from threading import Lock
@@ -235,12 +236,14 @@ def get_font_pool(
             str(base_path / "fonts_HW"),
         ]
         
-        logger.info("[FontPool] Initializing font pool...")
+        if multiprocessing.current_process().name == "MainProcess":
+            logger.info("[FontPool] Initializing font pool...")
+            
         _FONT_POOL_CACHE = scan_fonts_parallel(
             font_dirs,
             num_workers=num_workers,
             validate=validate,
-            verbose=True
+            verbose=(multiprocessing.current_process().name == "MainProcess")
         )
         
         if not _FONT_POOL_CACHE:
@@ -776,15 +779,13 @@ class MultiSourceTextDataset(IterableDataset):
                     dataset_name, 
                     config_name, 
                     split="train", 
-                    streaming=True, 
-                    trust_remote_code=True
+                    streaming=True
                 )
             else:
                 ds = load_dataset(
                     dataset_name, 
                     split="train", 
-                    streaming=True, 
-                    trust_remote_code=True
+                    streaming=True
                 )
 
             ds = ds.shuffle(seed=self.seed + self.current_source_idx, buffer_size=10000)
