@@ -17,13 +17,13 @@
         "overlap_comm": true,
         "reduce_scatter": true,
         "reduce_bucket_size": 2e8,
-        "contiguous_gradients": true,
-        "zero_allow_untested_optimizer": true
+        "contiguous_gradients": true
     },
     "gradient_accumulation_steps": "auto",
     "gradient_clipping": "auto",
     "train_batch_size": "auto",
     "train_micro_batch_size_per_gpu": "auto",
     "steps_per_print": 100,
-    "wall_clock_breakdown": false
+    "wall_clock_breakdown": false,
+    "zero_allow_untested_optimizer": true
 }
