@@ -4,6 +4,7 @@
 checkpoints/
 Triton_Layers/Lif_bcp.py
 notebook.ipynb
+pids.txt
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
