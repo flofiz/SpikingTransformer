@@ -377,10 +377,14 @@ def train():
 
     data_collator = WikiTextDataCollator(processor, max_length=MAX_CHARS)
 
+    # Reduce workers to avoid CPU saturation on multi-GPU
+    # 4 workers per GPU * 2 GPUs = 8 workers total, leaving room for main processes
+    num_workers = 4 
+
     train_loader = DataLoader(
         train_ds, 
         batch_size=BATCH_SIZE, 
-        num_workers=config["num_workers"], 
+        num_workers=num_workers, 
         prefetch_factor=2,
         persistent_workers=True,
         pin_memory=True,
@@ -392,7 +396,7 @@ def train():
     val_loader = DataLoader(
         val_ds, 
         batch_size=BATCH_SIZE, 
-        num_workers=config["num_workers"], 
+        num_workers=num_workers, 
         prefetch_factor=2,
         persistent_workers=True,
         pin_memory=True,
