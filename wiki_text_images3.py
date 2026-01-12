@@ -788,7 +788,7 @@ class MultiSourceTextDataset(IterableDataset):
                     streaming=True
                 )
 
-            ds = ds.shuffle(seed=self.seed + self.current_source_idx, buffer_size=10000)
+            ds = ds.shuffle(seed=self.seed + self.current_source_idx)#, buffer_size=10000)
             
             if self.split == "test":
                 n_test = int(self.test_size * 100000)
@@ -1112,7 +1112,7 @@ class WikiTextImageDataset(torch.utils.data.Dataset):
                     streaming=True
                 )
             
-            ds = ds.shuffle(seed=self.seed, buffer_size=10000)
+            ds = ds.shuffle(seed=self.seed)#, buffer_size=10000)
             
             if self.split == "test":
                 n_test = int(test_size * 100000)
@@ -1189,7 +1189,7 @@ class WikiTextImageDataset(torch.utils.data.Dataset):
             
             # Seed update for shuffle (Primary mechanism)
             unique_seed = self.seed + self.current_source_idx + shard_idx * 1000
-            ds = ds.shuffle(seed=unique_seed, buffer_size=10000)
+            ds = ds.shuffle(seed=unique_seed)#, buffer_size=10000)
             
             # Explicit sharding if supported (Optional but better)
             # Streaming datasets often support shard via splitting the underlying files
