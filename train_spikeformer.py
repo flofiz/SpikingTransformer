@@ -472,45 +472,57 @@ def train():
     # ============================================
     # DEEPSPEED INIT
     # ============================================
+    # ============================================
+    # DEEPSPEED INIT
+    # ============================================
     import json
     
-    # Load and patch config
-    ds_config_path = "ds_config.json"
-    if args.deepspeed_config:
-        ds_config_path = args.deepspeed_config
-        
-    with open(ds_config_path, "r") as f:
-        ds_config = json.load(f)
-        
-    # Patch "auto" values manually to avoid TypeErrors
-    if ds_config.get("train_micro_batch_size_per_gpu") == "auto":
-        ds_config["train_micro_batch_size_per_gpu"] = BATCH_SIZE
-        
-    if ds_config.get("train_batch_size") == "auto":
-        # Global batch size = micro_batch * accumulation * world_size
-        # But we can let DeepSpeed calculate it if we provide micro_batch and accumulation
-        del ds_config["train_batch_size"] 
+    model_engine = None
     
-    if ds_config.get("gradient_accumulation_steps") == "auto":
-        ds_config["gradient_accumulation_steps"] = 1
+    if args.deepspeed:
+        # Load and patch config
+        ds_config_path = "ds_config.json"
+        if args.deepspeed_config:
+            ds_config_path = args.deepspeed_config
+            
+        with open(ds_config_path, "r") as f:
+            ds_config = json.load(f)
+            
+        # Patch "auto" values manually to avoid TypeErrors
+        if ds_config.get("train_micro_batch_size_per_gpu") == "auto":
+            ds_config["train_micro_batch_size_per_gpu"] = BATCH_SIZE
+            
+        if ds_config.get("train_batch_size") == "auto":
+            del ds_config["train_batch_size"] 
         
-    if ds_config.get("gradient_clipping") == "auto":
-        ds_config["gradient_clipping"] = 1.0
+        if ds_config.get("gradient_accumulation_steps") == "auto":
+            ds_config["gradient_accumulation_steps"] = 1
+            
+        if ds_config.get("gradient_clipping") == "auto":
+            ds_config["gradient_clipping"] = 1.0
 
-    # Prevent conflict: DeepSpeed throws error if both config_params and args.deepspeed_config are set
-    args.deepspeed_config = None
+        # Prevent conflict: DeepSpeed throws error if both config_params and args.deepspeed_config are set
+        args.deepspeed_config = None
 
-    model_engine, optimizer, _, scheduler = deepspeed.initialize(
-        args=args,
-        model=model,
-        optimizer=optimizer,
-        lr_scheduler=scheduler,
-        config_params=ds_config,  # Pass patched config dict
-        dist_init_required=True
-    )
-    
-    if deepspeed.comm.get_rank() == 0:
-        print(f"DeepSpeed Engine Initialized.")
+        model_engine, optimizer, _, scheduler = deepspeed.initialize(
+            args=args,
+            model=model,
+            optimizer=optimizer,
+            lr_scheduler=scheduler,
+            config_params=ds_config,  # Pass patched config dict
+            dist_init_required=True
+        )
+        
+        if deepspeed.comm.get_rank() == 0:
+            print(f"DeepSpeed Engine Initialized.")
+            
+    else:
+        # Standard PyTorch Fallback
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        model = model.to(device)
+        model_engine = model # Use model as engine for convenience in loop
+        model_engine.device = device # Attach device property to mimic DS
+        print(f"Standard PyTorch Initialized (No DeepSpeed). Device: {device}")
 
     # ============================================
     # HELPERS
@@ -535,15 +547,29 @@ def train():
         n_batches = 0
         
         # Only show pbar on rank 0
-        disable_pbar = (deepspeed.comm.get_rank() != 0)
+        is_main_process = (not args.deepspeed) or (deepspeed.comm.get_rank() == 0)
+        disable_pbar = not is_main_process
         eval_pbar = tqdm(val_loader, desc="  Evaluation  ", unit="batch", disable=disable_pbar)
         
         for batch in eval_pbar:
-            src = batch["pixel_values"].to(model_engine.device, non_blocking=True).to(torch.bfloat16)
-            labels = batch["labels"].to(model_engine.device, non_blocking=True)
+            device = model_engine.device if hasattr(model_engine, 'device') else next(model_engine.parameters()).device
+            
+            # Cast to BF16 or Half only if DeepSpeed is on OR explicitly requested?
+            # User wants comparison. If Flora is on, maybe BF16 is good.
+            # But let's stick to simple logic: match what DS was doing if DS is on.
+            # If standard PyTorch, let's just .to(device) and let PyTorch handle dtype (Float32 default)
+            # UNLESS user manually casts.
+            # To be safe and fast for comparison, let's use Float32 for standard PyTorch unless we add more args.
+            
+            src = batch["pixel_values"].to(device, non_blocking=True)
+            labels = batch["labels"].to(device, non_blocking=True)
             tgt_in = labels[:, :-1]
             tgt_out = labels[:, 1:]
-            dec_mask = create_decoder_mask(tgt_in, PAD_IDX, model_engine.device).to(torch.bfloat16)
+            dec_mask = create_decoder_mask(tgt_in, PAD_IDX, device)
+            
+            if args.deepspeed:
+                 src = src.to(torch.bfloat16)
+                 dec_mask = dec_mask.to(torch.bfloat16)
             
             # Use inference context if possible, but standard forward ok
             # No manual autocast needed with DeepSpeed usually if fp16 enabled in config
@@ -572,8 +598,10 @@ def train():
                 eval_pbar.set_postfix({"L": f"{loss.item():.3f}", "A": f"{acc.item():.1%}"})
         
         # Dist reduce metrics
-        metrics_tensor = torch.tensor([eval_loss, eval_acc, eval_cer, n_batches], device=model_engine.device)
-        discord = torch.distributed.all_reduce(metrics_tensor, op=torch.distributed.ReduceOp.SUM)
+        metrics_tensor = torch.tensor([eval_loss, eval_acc, eval_cer, n_batches], device=device)
+        
+        if args.deepspeed:
+            torch.distributed.all_reduce(metrics_tensor, op=torch.distributed.ReduceOp.SUM)
         
         total_loss = metrics_tensor[0].item()
         total_acc = metrics_tensor[1].item()
@@ -586,13 +614,17 @@ def train():
         avg_ppl = compute_perplexity(avg_loss)
         
         # Get LR from optimizer managed by DS
-        cur_lr = model_engine.get_lr()[0] 
+        cur_lr = 0.0
+        if args.deepspeed:
+            cur_lr = model_engine.get_lr()[0]
+        else:
+            cur_lr = optimizer.param_groups[0]['lr']
         
         return avg_loss, avg_acc, avg_cer, avg_ppl, cur_lr
 
     @torch.no_grad()
     def print_examples_rank0(batch_src, batch_labels, logits_steps):
-        if deepspeed.comm.get_rank() != 0: return
+        if args.deepspeed and deepspeed.comm.get_rank() != 0: return
         
         logits = logits_steps.mean(dim=0)
         pred_tf_str = strings_from_logits_until_eos(processor, logits, EOS_IDX)
@@ -619,7 +651,8 @@ def train():
         model_engine.train()
         
         # Only rank 0 bar
-        disable_pbar = (deepspeed.comm.get_rank() != 0)
+        is_main_process = (not args.deepspeed) or (deepspeed.comm.get_rank() == 0)
+        disable_pbar = not is_main_process
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}", unit="batch", disable=disable_pbar)
         
         running_loss = 0.0
@@ -627,11 +660,17 @@ def train():
         for batch in pbar:
             global_step += 1
             
-            src = batch["pixel_values"].to(model_engine.device, non_blocking=True).to(torch.bfloat16)
-            labels = batch["labels"].to(model_engine.device, non_blocking=True)
+            device = model_engine.device if hasattr(model_engine, 'device') else next(model_engine.parameters()).device
+
+            src = batch["pixel_values"].to(device, non_blocking=True)
+            labels = batch["labels"].to(device, non_blocking=True)
             tgt_in = labels[:, :-1]
             tgt_out = labels[:, 1:]
-            dec_mask = create_decoder_mask(tgt_in, PAD_IDX, model_engine.device).to(torch.bfloat16)
+            dec_mask = create_decoder_mask(tgt_in, PAD_IDX, device)
+            
+            if args.deepspeed:
+                src = src.to(torch.bfloat16)
+                dec_mask = dec_mask.to(torch.bfloat16)
 
             # Forward
             logits_steps, _ = model_engine(
@@ -643,22 +682,35 @@ def train():
             loss = step_loss(logits_steps, tgt_out)
 
             # Backward
-            model_engine.backward(loss)
-            model_engine.step()
+            if args.deepspeed:
+                model_engine.backward(loss)
+                model_engine.step()
+            else:
+                loss.backward()
+                optimizer.step()
+                if scheduler: scheduler.step()
+                optimizer.zero_grad()
             
             # Logging
             loss_val = loss.item()
             running_loss += loss_val
             
-            if global_step % 10 == 0 and deepspeed.comm.get_rank() == 0:
-                log_metrics({
-                    "train/loss": loss_val,
-                    "train/perplexity": compute_perplexity(loss_val),
-                    "train/lr": model_engine.get_lr()[0],
-                    "train/epoch": epoch,
-                }, step=global_step)
+            if is_main_process:
+                if global_step % 10 == 0:
+                    lr_val = 0.0
+                    if args.deepspeed:
+                        lr_val = model_engine.get_lr()[0]
+                    else:
+                        lr_val = optimizer.param_groups[0]['lr']
+                        
+                    log_metrics({
+                        "train/loss": loss_val,
+                        "train/perplexity": compute_perplexity(loss_val),
+                        "train/lr": lr_val,
+                        "train/epoch": epoch,
+                    }, step=global_step)
             
-            if global_step % LOG_EVERY == 0 and deepspeed.comm.get_rank() == 0:
+            if global_step % LOG_EVERY == 0 and is_main_process:
                 avg_l = running_loss / LOG_EVERY
                 running_loss = 0.0
                 pbar.set_postfix({"Loss": f"{avg_l:.4f}"})
