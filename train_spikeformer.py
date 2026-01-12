@@ -513,11 +513,11 @@ def train():
         eval_pbar = tqdm(val_loader, desc="  Evaluation  ", unit="batch", disable=disable_pbar)
         
         for batch in eval_pbar:
-            src = batch["pixel_values"].to(model_engine.device, non_blocking=True).half()
+            src = batch["pixel_values"].to(model_engine.device, non_blocking=True).to(torch.bfloat16)
             labels = batch["labels"].to(model_engine.device, non_blocking=True)
             tgt_in = labels[:, :-1]
             tgt_out = labels[:, 1:]
-            dec_mask = create_decoder_mask(tgt_in, PAD_IDX, model_engine.device).half()
+            dec_mask = create_decoder_mask(tgt_in, PAD_IDX, model_engine.device).to(torch.bfloat16)
             
             # Use inference context if possible, but standard forward ok
             # No manual autocast needed with DeepSpeed usually if fp16 enabled in config
@@ -601,11 +601,11 @@ def train():
         for batch in pbar:
             global_step += 1
             
-            src = batch["pixel_values"].to(model_engine.device, non_blocking=True).half()
+            src = batch["pixel_values"].to(model_engine.device, non_blocking=True).to(torch.bfloat16)
             labels = batch["labels"].to(model_engine.device, non_blocking=True)
             tgt_in = labels[:, :-1]
             tgt_out = labels[:, 1:]
-            dec_mask = create_decoder_mask(tgt_in, PAD_IDX, model_engine.device).half()
+            dec_mask = create_decoder_mask(tgt_in, PAD_IDX, model_engine.device).to(torch.bfloat16)
 
             # Forward
             logits_steps, _ = model_engine(
