@@ -15,7 +15,17 @@ from torch.utils.data import DataLoader
 # Removed manual GradScaler/autocast for DeepSpeed
 # from torch.cuda.amp import autocast, GradScaler
 
-import deepspeed  # Added DeepSpeed import
+import torch.distributed as dist
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp.fully_sharded_data_parallel import (
+    CPUOffload,
+    BackwardPrefetch,
+)
+from torch.distributed.fsdp.wrap import (
+    size_based_auto_wrap_policy,
+    enable_wrap,
+    wrap,
+)
 
 from transformers import TrOCRProcessor
 import torch.nn.functional as F
@@ -239,8 +249,7 @@ def compute_cer(preds: List[str], targets: List[str]) -> float:
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Spiking Transformer OCR")
     
-    # DeepSpeed args
-    parser = deepspeed.add_config_arguments(parser)
+    # Distributed args
     parser.add_argument("--local_rank", type=int, default=-1, help="local rank for distributed training")
 
     # Training config
@@ -277,10 +286,18 @@ def parse_args():
 def train():
     args = parse_args()
     
-    # Distributed setup check
-    if args.local_rank != -1:
-        torch.cuda.set_device(args.local_rank)
-        deepspeed.init_distributed()
+    # Distributed setup
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    if local_rank == -1 and args.local_rank != -1:
+        local_rank = args.local_rank
+        
+    if local_rank != -1:
+        dist.init_process_group("nccl")
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        # Fallback for single GPU/CPU debugging
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
     config = get_training_config(args)
     # Important: Update config device if needed, though mostly handled by DS/torch
@@ -312,12 +329,13 @@ def train():
     if USE_MSSA and NHEAD % len(MSSA_SCALES) != 0:
         NHEAD = len(MSSA_SCALES) * (NHEAD // len(MSSA_SCALES) + 1)
         # Only print on rank 0
-        if (not args.deepspeed) or deepspeed.comm.get_rank() == 0:
+        if (not dist.is_initialized()) or dist.get_rank() == 0:
             print(f"[MSSA] Adjusted NHEAD to {NHEAD}")
 
     # Get available fonts count
     valid_fonts = get_font_pool()
     NUM_FONTS = len(valid_fonts)
+
 
     # WandB Config
     wandb_config = {
@@ -327,7 +345,8 @@ def train():
         "learning_rate": LR,
         "batch_size": BATCH_SIZE,
         "img_size": IMG_SIZE,
-        "deepspeed": True,
+        "deepspeed": False,
+        "fsdp": True,
         "num_fonts": NUM_FONTS
     }
     
@@ -335,14 +354,14 @@ def train():
     init_wandb(args, wandb_config)
     
     # Login only on main process, after distributed init
-    if (not args.deepspeed) or deepspeed.comm.get_rank() == 0:
+    if (not dist.is_initialized()) or dist.get_rank() == 0:
         do_wandb_init_on_rank0(args, wandb_config)
         print("="*60)
         print("Configuration:")
         print(f"  Batch size (per GPU): {BATCH_SIZE}")
         print(f"  Learning rate: {LR}")
         print(f"  Image size: {IMG_SIZE}")
-        print(f"  DeepSpeed Enabled")
+        print(f"  FSDP Enabled")
         print(f"  Fonts loaded: {NUM_FONTS}")
         print("="*60 + "\n")
 
@@ -426,8 +445,41 @@ def train():
         mssa_scales=MSSA_SCALES,
         in_channels=IN_CHANNELS,
         img_height=IMG_SIZE[0],
+    ).to(device)
+
+    # Wrap with FSDP
+    # Standard mixed precision policy for FSDP (BF16 if supported)
+    bf16_ready = (
+        torch.version.cuda
+        and torch.cuda.is_bf16_supported()
+        and os.environ.get("ACCELERATE_MIXED_PRECISION", "bf16") == "bf16"
     )
-    # Don't call .to(device) manually, DeepSpeed handles it, but creating on CPU first is standard.
+
+    mp_policy = None
+    if bf16_ready:
+        mp_policy = MixedPrecision(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.bfloat16,
+            buffer_dtype=torch.bfloat16,
+        )
+    else:
+        # Fallback to fp16
+        mp_policy = MixedPrecision(
+            param_dtype=torch.float16,
+            reduce_dtype=torch.float16,
+            buffer_dtype=torch.float16,
+        )
+
+    # Auto wrap policy: wrap layers > 10M params roughly, or transformer blocks
+    my_auto_wrap_policy = size_based_auto_wrap_policy 
+
+    model = FSDP(
+        model,
+        auto_wrap_policy=my_auto_wrap_policy,
+        mixed_precision=mp_policy,
+        device_id=device,
+        backward_prefetch=BackwardPrefetch.BACKWARD_PRE
+    )
 
     # ============================================
     # OPTIMIZER & SCHEDULER
@@ -435,7 +487,7 @@ def train():
     criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX, label_smoothing=0.1)
     
     if args.flora:
-        if (not args.deepspeed) or deepspeed.comm.get_rank() == 0:
+        if (not dist.is_initialized()) or dist.get_rank() == 0:
             print("[Optimizer] Using Flora (Memory Efficient) Optimizer")
         try:
             from flora_opt import Flora
@@ -443,7 +495,6 @@ def train():
                 model.parameters(), 
                 lr=LR, 
                 weight_decay=WEIGHT_DECAY
-                # Flora might have different default betas/eps, using defaults or minimal args
             )
         except ImportError:
             raise ImportError("Flora optimizer requested but not installed. Run: pip install flora-opt")
@@ -470,60 +521,7 @@ def train():
         cycle_momentum=(not args.flora)
     )
 
-    # ============================================
-    # DEEPSPEED INIT
-    # ============================================
-    # ============================================
-    # DEEPSPEED INIT
-    # ============================================
-    import json
-    
-    model_engine = None
-    
-    if args.deepspeed:
-        # Load and patch config
-        ds_config_path = "ds_config.json"
-        if args.deepspeed_config:
-            ds_config_path = args.deepspeed_config
-            
-        with open(ds_config_path, "r") as f:
-            ds_config = json.load(f)
-            
-        # Patch "auto" values manually to avoid TypeErrors
-        if ds_config.get("train_micro_batch_size_per_gpu") == "auto":
-            ds_config["train_micro_batch_size_per_gpu"] = BATCH_SIZE
-            
-        if ds_config.get("train_batch_size") == "auto":
-            del ds_config["train_batch_size"] 
-        
-        if ds_config.get("gradient_accumulation_steps") == "auto":
-            ds_config["gradient_accumulation_steps"] = 1
-            
-        if ds_config.get("gradient_clipping") == "auto":
-            ds_config["gradient_clipping"] = 1.0
-
-        # Prevent conflict: DeepSpeed throws error if both config_params and args.deepspeed_config are set
-        args.deepspeed_config = None
-
-        model_engine, optimizer, _, scheduler = deepspeed.initialize(
-            args=args,
-            model=model,
-            optimizer=optimizer,
-            lr_scheduler=scheduler,
-            config_params=ds_config,  # Pass patched config dict
-            dist_init_required=True
-        )
-        
-        if deepspeed.comm.get_rank() == 0:
-            print(f"DeepSpeed Engine Initialized.")
-            
-    else:
-        # Standard PyTorch Fallback
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        model = model.to(device)
-        model_engine = model # Use model as engine for convenience in loop
-        model_engine.device = device # Attach device property to mimic DS
-        print(f"Standard PyTorch Initialized (No DeepSpeed). Device: {device}")
+    model_engine = model # For compatibility with rest of code naming
 
     # ============================================
     # HELPERS
@@ -548,32 +546,24 @@ def train():
         n_batches = 0
         
         # Only show pbar on rank 0
-        is_main_process = (not args.deepspeed) or (deepspeed.comm.get_rank() == 0)
+        is_main_process = (not dist.is_initialized()) or (dist.get_rank() == 0)
         disable_pbar = not is_main_process
         eval_pbar = tqdm(val_loader, desc="  Evaluation  ", unit="batch", disable=disable_pbar)
         
         for batch in eval_pbar:
-            device = model_engine.device if hasattr(model_engine, 'device') else next(model_engine.parameters()).device
-            
-            # Cast to BF16 or Half only if DeepSpeed is on OR explicitly requested?
-            # User wants comparison. If Flora is on, maybe BF16 is good.
-            # But let's stick to simple logic: match what DS was doing if DS is on.
-            # If standard PyTorch, let's just .to(device) and let PyTorch handle dtype (Float32 default)
-            # UNLESS user manually casts.
-            # To be safe and fast for comparison, let's use Float32 for standard PyTorch unless we add more args.
-            
+            # device is already handled by loader/model if we move batch
             src = batch["pixel_values"].to(device, non_blocking=True)
             labels = batch["labels"].to(device, non_blocking=True)
             tgt_in = labels[:, :-1]
             tgt_out = labels[:, 1:]
             dec_mask = create_decoder_mask(tgt_in, PAD_IDX, device)
+
+            # FSDP Mixed Precision handles casting for parameters; inputs might need cast if strict?
+            # Usually torch handles float32 inputs -> BF16 operations automatically if autocast enabled or FSDP mixed precision
+            # But FSDP mixed precision is primarily for weights/gradients. 
+            # We don't need manual bfloat16 cast for inputs typically with FSDP mixed precision unless we want to save transfer bandwidth.
             
-            if args.deepspeed:
-                 src = src.to(torch.bfloat16)
-                 dec_mask = dec_mask.to(torch.bfloat16)
-            
-            # Use inference context if possible, but standard forward ok
-            # No manual autocast needed with DeepSpeed usually if fp16 enabled in config
+            # Forward
             logits_steps, _ = model_engine(
                 src, tgt_in, 
                 enc_padding_mask=None, 
@@ -585,7 +575,7 @@ def train():
             mean_logits = logits_steps.mean(dim=0)
             acc = compute_token_accuracy(mean_logits, tgt_out, PAD_IDX)
             
-            # Simple greedy decode for metric estimate (expensive)
+            # Simple greedy decode for metric estimate
             pred_strs = strings_from_logits_until_eos(processor, mean_logits, EOS_IDX)
             tgt_strs = tokens_to_strings_until_eos(processor, tgt_out, EOS_IDX)
             cer = compute_cer(pred_strs, tgt_strs)
@@ -601,8 +591,8 @@ def train():
         # Dist reduce metrics
         metrics_tensor = torch.tensor([eval_loss, eval_acc, eval_cer, n_batches], device=device)
         
-        if args.deepspeed:
-            torch.distributed.all_reduce(metrics_tensor, op=torch.distributed.ReduceOp.SUM)
+        if dist.is_initialized():
+            dist.all_reduce(metrics_tensor, op=dist.ReduceOp.SUM)
         
         total_loss = metrics_tensor[0].item()
         total_acc = metrics_tensor[1].item()
@@ -614,18 +604,13 @@ def train():
         avg_cer = total_cer / max(1, total_batches)
         avg_ppl = compute_perplexity(avg_loss)
         
-        # Get LR from optimizer managed by DS
-        cur_lr = 0.0
-        if args.deepspeed:
-            cur_lr = model_engine.get_lr()[0]
-        else:
-            cur_lr = optimizer.param_groups[0]['lr']
+        cur_lr = optimizer.param_groups[0]['lr']
         
         return avg_loss, avg_acc, avg_cer, avg_ppl, cur_lr
 
     @torch.no_grad()
     def print_examples_rank0(batch_src, batch_labels, logits_steps):
-        if args.deepspeed and deepspeed.comm.get_rank() != 0: return
+        if dist.is_initialized() and dist.get_rank() != 0: return
         
         logits = logits_steps.mean(dim=0)
         pred_tf_str = strings_from_logits_until_eos(processor, logits, EOS_IDX)
@@ -645,34 +630,31 @@ def train():
     global_step = 0
     best_val = float("inf")
     
-    # Resume checkpoint if needed using DeepSpeed load_checkpoint
-    # model_engine.load_checkpoint("checkpoints", tag="best_model")
-
+    # Resume checkpoint if needed
+    # (FSDP loading checkpoint logic would go here, simplified for now: manual load on rank 0 or FSDP load)
+    
     for epoch in range(1, NUM_EPOCHS + 1):
         model_engine.train()
         
         # Only rank 0 bar
-        is_main_process = (not args.deepspeed) or (deepspeed.comm.get_rank() == 0)
+        is_main_process = (not dist.is_initialized()) or (dist.get_rank() == 0)
         disable_pbar = not is_main_process
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch}", unit="batch", disable=disable_pbar)
+        if is_main_process:
+            pbar = tqdm(train_loader, desc=f"Epoch {epoch}", unit="batch", disable=disable_pbar)
+        else:
+            pbar = train_loader
         
         running_loss = 0.0
         
         for batch in pbar:
             global_step += 1
             
-            device = model_engine.device if hasattr(model_engine, 'device') else next(model_engine.parameters()).device
-
             src = batch["pixel_values"].to(device, non_blocking=True)
             labels = batch["labels"].to(device, non_blocking=True)
             tgt_in = labels[:, :-1]
             tgt_out = labels[:, 1:]
             dec_mask = create_decoder_mask(tgt_in, PAD_IDX, device)
             
-            if args.deepspeed:
-                src = src.to(torch.bfloat16)
-                dec_mask = dec_mask.to(torch.bfloat16)
-
             # Forward
             logits_steps, _ = model_engine(
                 src, tgt_in, 
@@ -683,14 +665,14 @@ def train():
             loss = step_loss(logits_steps, tgt_out)
 
             # Backward
-            if args.deepspeed:
-                model_engine.backward(loss)
-                model_engine.step()
-            else:
-                loss.backward()
-                optimizer.step()
-                if scheduler: scheduler.step()
-                optimizer.zero_grad()
+            loss.backward()
+            
+            # Gradient Clipping
+            model_engine.clip_grad_norm_(1.0)
+            
+            optimizer.step()
+            if scheduler: scheduler.step()
+            optimizer.zero_grad()
             
             # Logging
             loss_val = loss.item()
@@ -698,11 +680,7 @@ def train():
             
             if is_main_process:
                 if global_step % 10 == 0:
-                    lr_val = 0.0
-                    if args.deepspeed:
-                        lr_val = model_engine.get_lr()[0]
-                    else:
-                        lr_val = optimizer.param_groups[0]['lr']
+                    lr_val = optimizer.param_groups[0]['lr']
                         
                     log_metrics({
                         "train/loss": loss_val,
@@ -711,16 +689,16 @@ def train():
                         "train/epoch": epoch,
                     }, step=global_step)
             
-            if global_step % LOG_EVERY == 0 and is_main_process:
-                avg_l = running_loss / LOG_EVERY
-                running_loss = 0.0
-                pbar.set_postfix({"Loss": f"{avg_l:.4f}"})
+                if global_step % LOG_EVERY == 0:
+                    avg_l = running_loss / LOG_EVERY
+                    running_loss = 0.0
+                    pbar.set_postfix({"Loss": f"{avg_l:.4f}"})
             
             if global_step % EVAL_EVERY == 0:
                 val_loss, val_acc, val_cer, val_ppl, cur_lr = evaluate()
                 model_engine.train()
                 
-                if deepspeed.comm.get_rank() == 0:
+                if is_main_process:
                     print(f"\nEvaluation: Loss={val_loss:.4f} CER={val_cer:.2%}")
                     log_metrics({
                         "val/loss": val_loss,
@@ -730,9 +708,19 @@ def train():
                     
                     if val_loss < best_val:
                         best_val = val_loss
-                        # DeepSpeed save
-                        model_engine.save_checkpoint("checkpoints", tag="spikeformer_best")
-                        print("Saved best checkpoint.")
+                        # Save checkpoint
+                        # Simple FSDP State Dictionary saving (Full State Dict)
+                        # Warning: This gathers all weights to CPU/Rank 0.
+                        # For very large models, use SHARDED_STATE_DICT.
+                        from torch.distributed.fsdp import StateDictType, FullStateDictConfig
+                        save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+                        with FSDP.state_dict_type(model_engine, StateDictType.FULL_STATE_DICT, save_policy):
+                            cpu_state = model_engine.state_dict()
+                            if dist.get_rank() == 0:
+                                torch.save(cpu_state, f"checkpoints/spikeformer_best.pt")
+                        
+                        if dist.get_rank() == 0:
+                            print("Saved best checkpoint.")
         
     finish_wandb()
 
