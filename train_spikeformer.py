@@ -263,6 +263,9 @@ def parse_args():
     # Curriculum learning
     parser.add_argument("--use_curriculum", action="store_true", help="Enable curriculum learning")
     
+    # Optimizer
+    parser.add_argument("--flora", action="store_true", help="Use Flora memory-efficient optimizer")
+
     # WandB logging
     parser.add_argument("--use_wandb", action="store_true", help="Enable WandB logging")
     parser.add_argument("--wandb_project", type=str, default="spikeformer-ocr", help="WandB project name")
@@ -430,13 +433,27 @@ def train():
     # ============================================
     criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX, label_smoothing=0.1)
     
-    optimizer = torch.optim.AdamW(
-        model.parameters(), 
-        lr=LR, 
-        betas=(0.9, 0.98),
-        eps=1e-9,
-        weight_decay=WEIGHT_DECAY
-    )
+    if args.flora:
+        if deepspeed.comm.get_rank() == 0:
+            print("[Optimizer] Using Flora (Memory Efficient) Optimizer")
+        try:
+            from flora_opt import Flora
+            optimizer = Flora(
+                model.parameters(), 
+                lr=LR, 
+                weight_decay=WEIGHT_DECAY
+                # Flora might have different default betas/eps, using defaults or minimal args
+            )
+        except ImportError:
+            raise ImportError("Flora optimizer requested but not installed. Run: pip install flora-opt")
+    else:
+        optimizer = torch.optim.AdamW(
+            model.parameters(), 
+            lr=LR, 
+            betas=(0.9, 0.98),
+            eps=1e-9,
+            weight_decay=WEIGHT_DECAY
+        )
     
     total_steps = NUM_EPOCHS * len(train_loader)
     

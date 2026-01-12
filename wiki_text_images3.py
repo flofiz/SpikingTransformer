@@ -1157,13 +1157,13 @@ class WikiTextImageDataset(torch.utils.data.Dataset):
                     dataset_name, 
                     config_name, 
                     split="train", 
-                    streaming=True
+                    streaming=False
                 )
             else:
                 ds = load_dataset(
                     dataset_name, 
                     split="train", 
-                    streaming=True
+                    streaming=False
                 )
             
             # === Distributed Sharding Logic ===
