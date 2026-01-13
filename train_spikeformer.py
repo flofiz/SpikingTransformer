@@ -178,22 +178,6 @@ def get_training_config(args):
     }
 
 
-def get_curriculum_config(step: int, total_steps: int) -> dict:
-    """
-    Returns curriculum configuration based on training progress.
-    Starts with shorter sequences and smaller batch sizes, gradually increases.
-    """
-    progress = step / max(1, total_steps)
-    
-    if progress < 0.15:      # Phase 1: 0-15%
-        return {"max_chars": 32, "batch_multiplier": 2.0}
-    elif progress < 0.35:    # Phase 2: 15-35%
-        return {"max_chars": 48, "batch_multiplier": 1.5}
-    elif progress < 0.60:    # Phase 3: 35-60%
-        return {"max_chars": 80, "batch_multiplier": 1.0}
-    else:                    # Phase 4: 60-100%
-        return {"max_chars": 128, "batch_multiplier": 0.75}
-
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 torch.backends.cudnn.benchmark = True
@@ -359,7 +343,6 @@ def parse_args():
     parser.add_argument("--img_width", type=int, default=768, help="Image width (SotA: 768 for text lines)")
     
     # Curriculum learning
-    parser.add_argument("--use_curriculum", action="store_true", help="Enable curriculum learning")
     
     # WandB logging
     parser.add_argument("--use_wandb", action="store_true", help="Enable WandB logging")
@@ -370,20 +353,6 @@ def parse_args():
 
 
 
-def create_train_loader(train_ds, data_collator, sampler, batch_size, num_workers):
-    """Helper to create dataloader with specific batch size."""
-    return DataLoader(
-        train_ds, 
-        batch_size=batch_size, 
-        num_workers=num_workers, 
-        prefetch_factor=8,
-        persistent_workers=True,
-        pin_memory=True,
-        drop_last=True,
-        collate_fn=data_collator,
-        sampler=sampler,
-        shuffle=(sampler is None), 
-    )
 
 
 def train():
@@ -414,8 +383,6 @@ def train():
     USE_MSSA = args.use_mssa
     MSSA_SCALES = [int(x) for x in args.mssa_scales.split(",")]
     IN_CHANNELS = args.in_channels
-    IN_CHANNELS = args.in_channels
-    USE_CURRICULUM = args.use_curriculum
     GRADIENT_CHECKPOINTING = args.gradient_checkpointing
 
     # Config DDP
@@ -449,7 +416,6 @@ def train():
         "mssa_scales": MSSA_SCALES,
         "in_channels": IN_CHANNELS,
         "in_channels": IN_CHANNELS,
-        "use_curriculum": USE_CURRICULUM,
         "gradient_checkpointing": GRADIENT_CHECKPOINTING,
         "world_size": WORLD_SIZE,
         "is_ddp": IS_DDP
@@ -474,7 +440,6 @@ def train():
         if USE_MSSA:
             print(f"  MSSA scales: {MSSA_SCALES}")
         print(f"  NUM_STEPS: {NUM_STEPS}")
-        print(f"  Curriculum learning: {USE_CURRICULUM}")
         print(f"  Gradient Checkpointing: {GRADIENT_CHECKPOINTING}")
         print(f"  WandB logging: {WANDB_AVAILABLE}")
         print("="*60 + "\n")
@@ -523,12 +488,17 @@ def train():
     # Data Collator for dynamic padding
     data_collator = WikiTextDataCollator(processor, max_length=MAX_CHARS)
 
-    train_loader = create_train_loader(
+    train_loader = DataLoader(
         train_ds, 
-        data_collator, 
-        train_sampler, 
-        BATCH_SIZE, 
-        config["num_workers"]
+        batch_size=BATCH_SIZE, 
+        num_workers=config["num_workers"], 
+        prefetch_factor=8,
+        persistent_workers=True,
+        pin_memory=True,
+        drop_last=True,
+        collate_fn=data_collator,
+        sampler=train_sampler,
+        shuffle=(sampler is None), 
     )
 
     val_loader = DataLoader(
@@ -632,27 +602,6 @@ def train():
     scaler = GradScaler()
     total_steps = NUM_EPOCHS * len(train_loader)
     
-    if is_main_process() and USE_CURRICULUM:
-        print("="*60)
-        print("📅 Curriculum Schedule:")
-        print("="*60)
-        phases = [
-            (0.15, "Phase 1"),
-            (0.35, "Phase 2"),
-            (0.60, "Phase 3"),
-            (1.00, "Phase 4")
-        ]
-        prev_step = 0
-        for threshold, name in phases:
-            end_step = int(total_steps * threshold)
-            representative_step = int(max(0, total_steps * threshold - 1))
-            cfg = get_curriculum_config(representative_step, total_steps)
-            effective_bs = int(BATCH_SIZE * cfg["batch_multiplier"])
-            
-            print(f"  {name:<8} | Steps {prev_step:6d} - {end_step:6d} | Max Chars: {cfg['max_chars']:3d} | Batch Size: {effective_bs}")
-            prev_step = end_step + 1
-        print("="*60 + "\n")
-
     
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
@@ -895,32 +844,6 @@ def train():
         if is_main_process():
             print(f"\n⚠️ Aucun checkpoint trouvé à {ckpt_path}. Démarrage de zéro.\n", flush=True)
 
-        # Curriculum State
-        current_max_chars = MAX_CHARS # Default start
-        if USE_CURRICULUM:
-             # Initialize with correct starting state (Phase 1 probably)
-             initial_curriculum = get_curriculum_config(global_step, total_steps)
-             current_max_chars = initial_curriculum["max_chars"]
-             current_batch_multiplier = initial_curriculum["batch_multiplier"]
-             
-             # Apply immediately if needed
-             if current_max_chars != MAX_CHARS or current_batch_multiplier != 1.0:
-                 if is_main_process():
-                     print(f"[Curriculum] Initializing: max_chars={current_max_chars}, mult={current_batch_multiplier}")
-                 
-                 train_ds.max_chars = current_max_chars
-                 # Update max_target_length which is used for splitting
-                 train_ds.max_target_length = current_max_chars 
-                 # Clear cache to force new sentence splitting
-                 if hasattr(train_ds, "_sentence_cache"):
-                     with train_ds._cache_lock:
-                         train_ds._sentence_cache = []
-                 
-                 data_collator.max_length = current_max_chars
-                 cur_batch_size = int(BATCH_SIZE * current_batch_multiplier)
-                 
-                 # Recreate loader
-                 train_loader = create_train_loader(train_ds, data_collator, train_sampler, cur_batch_size, config["num_workers"])
 
     for epoch in range(start_epoch, NUM_EPOCHS + 1):
         model.train()
@@ -941,50 +864,6 @@ def train():
         for batch in pbar:
             global_step += 1
             
-            # Curriculum learning update
-            if USE_CURRICULUM:
-                curriculum = get_curriculum_config(global_step, total_steps)
-                new_max_chars = curriculum["max_chars"]
-                new_multiplier = curriculum["batch_multiplier"]
-                
-                if new_max_chars != current_max_chars or new_multiplier != current_batch_multiplier:
-                    if is_main_process():
-                        print(f"\n[Curriculum] Step {global_step}: Updating max_chars={new_max_chars}, batch_mult={new_multiplier}")
-                    
-                    # Update state
-                    current_max_chars = new_max_chars
-                    current_batch_multiplier = new_multiplier
-                    
-                    # Update dataset
-                    train_ds.max_chars = current_max_chars
-                    train_ds.max_target_length = current_max_chars
-                    # Clear cache to force new sentence splitting
-                    if hasattr(train_ds, "_sentence_cache"):
-                        with train_ds._cache_lock:
-                            train_ds._sentence_cache = []
-                            
-                    # Update collator
-                    data_collator.max_length = current_max_chars
-                    
-                    # Compute new batch size
-                    new_batch_size = int(BATCH_SIZE * current_batch_multiplier)
-                    
-                    if is_main_process():
-                         print(f"[Curriculum] Recreating DataLoader with batch_size={new_batch_size}")
-                    
-                    # Recreate DataLoader
-                    train_loader = create_train_loader(
-                        train_ds, 
-                        data_collator, 
-                        train_sampler, 
-                        new_batch_size, 
-                        config["num_workers"]
-                    )
-                    
-                    # Break the current epoch loop to restart with new loader
-                    # We will continue to the next iteration of 'for epoch' loop
-                    # Note: This technically advances the 'epoch' counter, but since we have total_steps based logic, it's fine.
-                    break 
             
             optimizer.zero_grad(set_to_none=True)
 
@@ -1038,7 +917,7 @@ def train():
                     "train/perplexity": current_ppl,
                     "train/grad_norm": grad_norm,
                     "train/learning_rate": current_lr,
-                    "train/batch_size": int(BATCH_SIZE * (current_batch_multiplier if USE_CURRICULUM else 1.0)) * WORLD_SIZE if IS_DDP else int(BATCH_SIZE * (current_batch_multiplier if USE_CURRICULUM else 1.0)),
+                    "train/batch_size": BATCH_SIZE * WORLD_SIZE if IS_DDP else BATCH_SIZE,
                     "train/avg_chars": avg_chars_per_sample,
                     "train/epoch": epoch,
                 }, step=global_step)
