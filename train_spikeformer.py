@@ -348,6 +348,10 @@ def parse_args():
 
     parser.set_defaults(gradient_checkpointing=True)
 
+    # Optimizers
+    parser.add_argument("--adam8", action="store_true", help="Use Adam 8-bit optimizer (requires bitsandbytes)")
+    parser.add_argument("--flora", action="store_true", help="Use Flora optimizer (requires flora-opt)")
+
     parser.add_argument("--compile", action="store_true", help="Enable torch.compile() for faster training")
     
     # Image config - State-of-the-art sizes for OCR
@@ -569,13 +573,48 @@ def train():
     # ============================================
     criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX, label_smoothing=0.1)
     
-    optimizer = torch.optim.AdamW(
-        model.parameters(), 
-        lr=LR, 
-        betas=(0.9, 0.98),
-        eps=1e-9,
-        weight_decay=WEIGHT_DECAY
-    )
+    # Check for mutual exclusivity
+    if args.adam8 and args.flora:
+        raise ValueError("Cannot use both --adam8 and --flora. Please choose one.")
+
+    if args.adam8:
+        if is_main_process():
+            print("[Optimizer] Using Adam 8-bit (bitsandbytes)")
+        try:
+            import bitsandbytes as bnb
+            optimizer = bnb.optim.AdamW8bit(
+                model.parameters(), 
+                lr=LR, 
+                betas=(0.9, 0.98), 
+                eps=1e-9, 
+                weight_decay=WEIGHT_DECAY
+            )
+        except ImportError:
+            raise ImportError("Please install bitsandbytes to use --adam8 (pip install bitsandbytes)")
+            
+    elif args.flora:
+        if is_main_process():
+            print("[Optimizer] Using Flora (flora-opt)")
+        try:
+            from flora_opt import Flora
+            optimizer = Flora(
+                model.parameters(), 
+                lr=LR, 
+                weight_decay=WEIGHT_DECAY
+            )
+        except ImportError:
+            raise ImportError("Please install flora-opt to use --flora (pip install flora-opt)")
+            
+    else:
+        if is_main_process():
+            print("[Optimizer] Using Standard AdamW")
+        optimizer = torch.optim.AdamW(
+            model.parameters(), 
+            lr=LR, 
+            betas=(0.9, 0.98),
+            eps=1e-9,
+            weight_decay=WEIGHT_DECAY
+        )
     
     scaler = GradScaler()
     total_steps = NUM_EPOCHS * len(train_loader)
