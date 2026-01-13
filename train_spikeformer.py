@@ -369,7 +369,25 @@ def parse_args():
     return parser.parse_args()
 
 
+
+def create_train_loader(train_ds, data_collator, sampler, batch_size, num_workers):
+    """Helper to create dataloader with specific batch size."""
+    return DataLoader(
+        train_ds, 
+        batch_size=batch_size, 
+        num_workers=num_workers, 
+        prefetch_factor=8,
+        persistent_workers=True,
+        pin_memory=True,
+        drop_last=True,
+        collate_fn=data_collator,
+        sampler=sampler,
+        shuffle=(sampler is None), 
+    )
+
+
 def train():
+
     args = parse_args()
     config = get_training_config(args)
     
@@ -475,7 +493,7 @@ def train():
         split="train",
         img_size=IMG_SIZE,
         train=True,
-        max_samples=50_000_000,
+        max_samples=100_000,
         max_chars=MAX_CHARS,
         cache_size=100,
         article_rotation_interval=500_000,
@@ -505,17 +523,12 @@ def train():
     # Data Collator for dynamic padding
     data_collator = WikiTextDataCollator(processor, max_length=MAX_CHARS)
 
-    train_loader = DataLoader(
+    train_loader = create_train_loader(
         train_ds, 
-        batch_size=BATCH_SIZE, 
-        num_workers=config["num_workers"], 
-        prefetch_factor=8,
-        persistent_workers=True,
-        pin_memory=True,
-        drop_last=True,
-        collate_fn=data_collator,
-        sampler=train_sampler,
-        shuffle=(train_sampler is None), # Shuffle only if no sampler
+        data_collator, 
+        train_sampler, 
+        BATCH_SIZE, 
+        config["num_workers"]
     )
 
     val_loader = DataLoader(
@@ -618,6 +631,28 @@ def train():
     
     scaler = GradScaler()
     total_steps = NUM_EPOCHS * len(train_loader)
+    
+    if is_main_process() and USE_CURRICULUM:
+        print("="*60)
+        print("📅 Curriculum Schedule:")
+        print("="*60)
+        phases = [
+            (0.15, "Phase 1"),
+            (0.35, "Phase 2"),
+            (0.60, "Phase 3"),
+            (1.00, "Phase 4")
+        ]
+        prev_step = 0
+        for threshold, name in phases:
+            end_step = int(total_steps * threshold)
+            representative_step = int(max(0, total_steps * threshold - 1))
+            cfg = get_curriculum_config(representative_step, total_steps)
+            effective_bs = int(BATCH_SIZE * cfg["batch_multiplier"])
+            
+            print(f"  {name:<8} | Steps {prev_step:6d} - {end_step:6d} | Max Chars: {cfg['max_chars']:3d} | Batch Size: {effective_bs}")
+            prev_step = end_step + 1
+        print("="*60 + "\n")
+
     
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
@@ -860,6 +895,33 @@ def train():
         if is_main_process():
             print(f"\n⚠️ Aucun checkpoint trouvé à {ckpt_path}. Démarrage de zéro.\n", flush=True)
 
+        # Curriculum State
+        current_max_chars = MAX_CHARS # Default start
+        if USE_CURRICULUM:
+             # Initialize with correct starting state (Phase 1 probably)
+             initial_curriculum = get_curriculum_config(global_step, total_steps)
+             current_max_chars = initial_curriculum["max_chars"]
+             current_batch_multiplier = initial_curriculum["batch_multiplier"]
+             
+             # Apply immediately if needed
+             if current_max_chars != MAX_CHARS or current_batch_multiplier != 1.0:
+                 if is_main_process():
+                     print(f"[Curriculum] Initializing: max_chars={current_max_chars}, mult={current_batch_multiplier}")
+                 
+                 train_ds.max_chars = current_max_chars
+                 # Update max_target_length which is used for splitting
+                 train_ds.max_target_length = current_max_chars 
+                 # Clear cache to force new sentence splitting
+                 if hasattr(train_ds, "_sentence_cache"):
+                     with train_ds._cache_lock:
+                         train_ds._sentence_cache = []
+                 
+                 data_collator.max_length = current_max_chars
+                 cur_batch_size = int(BATCH_SIZE * current_batch_multiplier)
+                 
+                 # Recreate loader
+                 train_loader = create_train_loader(train_ds, data_collator, train_sampler, cur_batch_size, config["num_workers"])
+
     for epoch in range(start_epoch, NUM_EPOCHS + 1):
         model.train()
         running_loss = 0.0
@@ -879,11 +941,50 @@ def train():
         for batch in pbar:
             global_step += 1
             
-            # Curriculum learning
+            # Curriculum learning update
             if USE_CURRICULUM:
                 curriculum = get_curriculum_config(global_step, total_steps)
-                # Note: Dynamic batch size change not implemented in this loop
-                # but max_chars can be used in future data loader updates
+                new_max_chars = curriculum["max_chars"]
+                new_multiplier = curriculum["batch_multiplier"]
+                
+                if new_max_chars != current_max_chars or new_multiplier != current_batch_multiplier:
+                    if is_main_process():
+                        print(f"\n[Curriculum] Step {global_step}: Updating max_chars={new_max_chars}, batch_mult={new_multiplier}")
+                    
+                    # Update state
+                    current_max_chars = new_max_chars
+                    current_batch_multiplier = new_multiplier
+                    
+                    # Update dataset
+                    train_ds.max_chars = current_max_chars
+                    train_ds.max_target_length = current_max_chars
+                    # Clear cache to force new sentence splitting
+                    if hasattr(train_ds, "_sentence_cache"):
+                        with train_ds._cache_lock:
+                            train_ds._sentence_cache = []
+                            
+                    # Update collator
+                    data_collator.max_length = current_max_chars
+                    
+                    # Compute new batch size
+                    new_batch_size = int(BATCH_SIZE * current_batch_multiplier)
+                    
+                    if is_main_process():
+                         print(f"[Curriculum] Recreating DataLoader with batch_size={new_batch_size}")
+                    
+                    # Recreate DataLoader
+                    train_loader = create_train_loader(
+                        train_ds, 
+                        data_collator, 
+                        train_sampler, 
+                        new_batch_size, 
+                        config["num_workers"]
+                    )
+                    
+                    # Break the current epoch loop to restart with new loader
+                    # We will continue to the next iteration of 'for epoch' loop
+                    # Note: This technically advances the 'epoch' counter, but since we have total_steps based logic, it's fine.
+                    break 
             
             optimizer.zero_grad(set_to_none=True)
 
@@ -937,7 +1038,7 @@ def train():
                     "train/perplexity": current_ppl,
                     "train/grad_norm": grad_norm,
                     "train/learning_rate": current_lr,
-                    "train/batch_size": BATCH_SIZE * WORLD_SIZE if IS_DDP else BATCH_SIZE,
+                    "train/batch_size": int(BATCH_SIZE * (current_batch_multiplier if USE_CURRICULUM else 1.0)) * WORLD_SIZE if IS_DDP else int(BATCH_SIZE * (current_batch_multiplier if USE_CURRICULUM else 1.0)),
                     "train/avg_chars": avg_chars_per_sample,
                     "train/epoch": epoch,
                 }, step=global_step)
