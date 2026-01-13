@@ -300,6 +300,11 @@ def parse_args():
     parser.add_argument("--in_channels", type=int, default=3, choices=[1, 3], 
                         help="Input channels: 1 for grayscale, 3 for RGB")
     parser.add_argument("--num_steps", type=int, default=8, help="Number of SNN timesteps")
+
+    # Optimization
+    parser.add_argument("--no_gradient_checkpointing", action="store_false", dest="gradient_checkpointing",
+                        help="Disable gradient checkpointing (enabled by default)")
+    parser.set_defaults(gradient_checkpointing=True)
     
     # Image config - State-of-the-art sizes for OCR
     parser.add_argument("--img_height", type=int, default=64, help="Image height (SotA: 64 for text lines)")
@@ -343,7 +348,9 @@ def train():
     USE_MSSA = args.use_mssa
     MSSA_SCALES = [int(x) for x in args.mssa_scales.split(",")]
     IN_CHANNELS = args.in_channels
+    IN_CHANNELS = args.in_channels
     USE_CURRICULUM = args.use_curriculum
+    GRADIENT_CHECKPOINTING = args.gradient_checkpointing
 
     # Adjust NHEAD for MSSA compatibility
     if USE_MSSA and NHEAD % len(MSSA_SCALES) != 0:
@@ -368,7 +375,9 @@ def train():
         "use_mssa": USE_MSSA,
         "mssa_scales": MSSA_SCALES,
         "in_channels": IN_CHANNELS,
+        "in_channels": IN_CHANNELS,
         "use_curriculum": USE_CURRICULUM,
+        "gradient_checkpointing": GRADIENT_CHECKPOINTING,
     }
     
     # Initialize WandB
@@ -387,7 +396,9 @@ def train():
     if USE_MSSA:
         print(f"  MSSA scales: {MSSA_SCALES}")
     print(f"  NUM_STEPS: {NUM_STEPS}")
+    print(f"  NUM_STEPS: {NUM_STEPS}")
     print(f"  Curriculum learning: {USE_CURRICULUM}")
+    print(f"  Gradient Checkpointing: {GRADIENT_CHECKPOINTING}")
     print(f"  WandB logging: {WANDB_AVAILABLE}")
     print("="*60 + "\n")
 
@@ -471,6 +482,7 @@ def train():
         mssa_scales=MSSA_SCALES,   # New: MSSA scales
         in_channels=IN_CHANNELS,   # New: RGB or grayscale input
         img_height=IMG_SIZE[0],    # New: image height for channel computation
+        gradient_checkpointing=GRADIENT_CHECKPOINTING, # New: gradient checkpointing
     ).to(config["device"])
 
     # Print model summary

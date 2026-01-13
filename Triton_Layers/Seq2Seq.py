@@ -76,7 +76,8 @@ class Seq2Seq(nn.Module):
                  use_mssa: bool = False,
                  mssa_scales: List[int] = [1, 2, 4],
                  in_channels: int = 1,
-                 img_height: int = 32):
+                 img_height: int = 32,
+                 gradient_checkpointing: bool = False):
         super().__init__()
         self.n_steps = n_steps
         self.mask_mode = mask_mode
@@ -100,7 +101,8 @@ class Seq2Seq(nn.Module):
             n_steps=n_steps,
             mask_mode=mask_mode,
             use_mssa=use_mssa,
-            mssa_scales=mssa_scales
+            mssa_scales=mssa_scales,
+            gradient_checkpointing=gradient_checkpointing
         )
         
         self.decoder = Decoder(
@@ -113,7 +115,8 @@ class Seq2Seq(nn.Module):
             n_steps=n_steps,
             mask_mode=mask_mode,
             use_mssa=use_mssa,
-            mssa_scales=mssa_scales
+            mssa_scales=mssa_scales,
+            gradient_checkpointing=gradient_checkpointing
         )
         self.output_layer = nn.Linear(d_model, tgt_vocab_size)
         self.lifPE = LIF(n_steps=n_steps)

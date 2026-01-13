@@ -93,10 +93,12 @@ class Encoder(nn.Module):
         n_steps: int = 10,
         mask_mode: Literal["multiply", "additive"] = "multiply",
         use_mssa: bool = False,
-        mssa_scales: list = [1, 2, 4]
+        mssa_scales: list = [1, 2, 4],
+        gradient_checkpointing: bool = False
     ):
         super().__init__()
         
+        self.gradient_checkpointing = gradient_checkpointing
         self.layers = nn.ModuleList()
         for i in range(num_layers):
             # Use MSSA only in first 2 layers (as per MSViT paper)
@@ -118,5 +120,8 @@ class Encoder(nn.Module):
     def forward(self, x, mask=None):
         # x: [T, B, N, D]
         for layer in self.layers:
-            x = layer(x, mask=mask)
+            if self.gradient_checkpointing and self.training:
+                x = torch.utils.checkpoint.checkpoint(layer, x, mask, use_reentrant=False)
+            else:
+                x = layer(x, mask=mask)
         return x
