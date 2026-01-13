@@ -1,5 +1,5 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import argparse
@@ -11,6 +11,9 @@ from tqdm.auto import tqdm
 import torch
 from torch import nn, Tensor
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import init_process_group, destroy_process_group
 from torch.cuda.amp import autocast, GradScaler
 
 from transformers import TrOCRProcessor
@@ -22,20 +25,39 @@ from wiki_text_images3 import WikiTextImageDataset, WikiTextDataCollator
 # ============================================
 # WANDB INTEGRATION
 # ============================================
+def setup_ddp():
+    """Initialize Distributed Data Parallel"""
+    if "RANK" not in os.environ:
+        # Single GPU fallback
+        return False
+        
+    init_process_group(backend="nccl")
+    torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    return True
+
+def cleanup_ddp():
+    """Destroy process group"""
+    if torch.distributed.is_initialized():
+        destroy_process_group()
+
+def is_main_process():
+    """Returns True if this is the main process (rank 0)"""
+    return not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
+
+# ============================================
+# WANDB INTEGRATION
+# ============================================
 WANDB_AVAILABLE = False
 wandb = None
 
 def init_wandb(args, config_dict: dict) -> bool:
     """
     Initialize WandB from API key file.
-    
-    Looks for API key in:
-    1. Environment variable WANDB_API_KEY
-    2. File: wandb_key.txt in current directory
-    3. File: ~/.wandb_key
-    
-    Returns True if WandB was initialized successfully.
+    Only on rank 0.
     """
+    if not is_main_process():
+        return False
+
     global WANDB_AVAILABLE, wandb
     
     if not args.use_wandb:
@@ -78,7 +100,7 @@ def init_wandb(args, config_dict: dict) -> bool:
             project=args.wandb_project,
             name=args.wandb_run_name or f"spikeformer_{time.strftime('%Y%m%d_%H%M%S')}",
             config=config_dict,
-            tags=["spiking-transformer", "ocr"],
+            tags=["spiking-transformer", "ocr", "ddp" if torch.distributed.is_initialized() else "single"],
         )
         WANDB_AVAILABLE = True
         print(f"[WandB] Initialized: {wandb.run.url}")
@@ -89,14 +111,14 @@ def init_wandb(args, config_dict: dict) -> bool:
 
 
 def log_metrics(metrics: dict, step: int):
-    """Log metrics to WandB if available."""
-    if WANDB_AVAILABLE and wandb is not None:
+    """Log metrics to WandB if available (Rank 0 only)."""
+    if is_main_process() and WANDB_AVAILABLE and wandb is not None:
         wandb.log(metrics, step=step)
 
 
 def finish_wandb():
-    """Finish WandB run."""
-    if WANDB_AVAILABLE and wandb is not None:
+    """Finish WandB run (Rank 0 only)."""
+    if is_main_process() and WANDB_AVAILABLE and wandb is not None:
         wandb.finish()
 
 
@@ -108,14 +130,28 @@ def get_training_config(args):
     Returns training configuration based on GPU and arguments.
     Auto-detects GPU type if batch_size not specified.
     """
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    
+    # DDP Setup
+    is_ddp = setup_ddp()
+    if is_ddp:
+        local_rank = int(os.environ["LOCAL_RANK"])
+        global_rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        device = f"cuda:{local_rank}"
+        print(f"[DDP] Initialized process {global_rank}/{world_size} on {device}")
+    else:
+        local_rank = 0
+        global_rank = 0
+        world_size = 1
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
     if args.batch_size is not None:
         batch_size = args.batch_size
     else:
         # Auto-detect based on GPU VRAM
         if torch.cuda.is_available():
-            total_vram = torch.cuda.get_device_properties(0).total_memory / 1e9
+            # Use local_rank for correct device properties in DDP
+            props_idx = local_rank if is_ddp else 0
+            total_vram = torch.cuda.get_device_properties(props_idx).total_memory / 1e9
             if total_vram >= 70:  # A100 80GB
                 batch_size = 96
             elif total_vram >= 30:  # A100 40GB
@@ -124,7 +160,8 @@ def get_training_config(args):
                 batch_size = 48
             else:  # RTX 4070 Ti Super 16GB or smaller
                 batch_size = 24
-            print(f"[AutoConfig] Detected {total_vram:.1f}GB VRAM -> batch_size={batch_size}")
+            if is_main_process():
+                print(f"[AutoConfig] Detected {total_vram:.1f}GB VRAM -> batch_size={batch_size}")
         else:
             batch_size = 8
     
@@ -134,6 +171,10 @@ def get_training_config(args):
         "device": device,
         "batch_size": batch_size,
         "num_workers": num_workers,
+        "is_ddp": is_ddp,
+        "rank": global_rank,
+        "local_rank": local_rank,
+        "world_size": world_size,
     }
 
 
@@ -355,10 +396,16 @@ def train():
     USE_CURRICULUM = args.use_curriculum
     GRADIENT_CHECKPOINTING = args.gradient_checkpointing
 
+    # Config DDP
+    IS_DDP = config["is_ddp"]
+    RANK = config["rank"]
+    WORLD_SIZE = config["world_size"]
+
     # Adjust NHEAD for MSSA compatibility
     if USE_MSSA and NHEAD % len(MSSA_SCALES) != 0:
         NHEAD = len(MSSA_SCALES) * (NHEAD // len(MSSA_SCALES) + 1)
-        print(f"[MSSA] Adjusted NHEAD to {NHEAD} for compatibility with {len(MSSA_SCALES)} scales")
+        if is_main_process():
+            print(f"[MSSA] Adjusted NHEAD to {NHEAD} for compatibility with {len(MSSA_SCALES)} scales")
 
     # Create config dict for WandB
     wandb_config = {
@@ -369,7 +416,8 @@ def train():
         "num_decoder_layers": NUM_DECODER_LAYERS,
         "num_steps": NUM_STEPS,
         "learning_rate": LR,
-        "batch_size": BATCH_SIZE,
+        "batch_size": BATCH_SIZE * WORLD_SIZE, # Total batch size
+        "batch_size_per_gpu": BATCH_SIZE,
         "img_size": IMG_SIZE,
         "max_chars": MAX_CHARS,
         "grad_clip_norm": GRAD_CLIP_NORM,
@@ -381,29 +429,33 @@ def train():
         "in_channels": IN_CHANNELS,
         "use_curriculum": USE_CURRICULUM,
         "gradient_checkpointing": GRADIENT_CHECKPOINTING,
+        "world_size": WORLD_SIZE,
+        "is_ddp": IS_DDP
     }
     
     # Initialize WandB
     init_wandb(args, wandb_config)
 
-    print("="*60)
-    print("Configuration:")
-    print("="*60)
-    print(f"  Device: {config['device']}")
-    print(f"  Batch size: {BATCH_SIZE}")
-    print(f"  Learning rate: {LR}")
-    print(f"  Image size: {IMG_SIZE}")
-    print(f"  Input channels: {IN_CHANNELS} ({'RGB' if IN_CHANNELS == 3 else 'Grayscale'})")
-    print(f"  Mask mode: {MASK_MODE}")
-    print(f"  Use MSSA: {USE_MSSA}")
-    if USE_MSSA:
-        print(f"  MSSA scales: {MSSA_SCALES}")
-    print(f"  NUM_STEPS: {NUM_STEPS}")
-    print(f"  NUM_STEPS: {NUM_STEPS}")
-    print(f"  Curriculum learning: {USE_CURRICULUM}")
-    print(f"  Gradient Checkpointing: {GRADIENT_CHECKPOINTING}")
-    print(f"  WandB logging: {WANDB_AVAILABLE}")
-    print("="*60 + "\n")
+    if is_main_process():
+        print("="*60)
+        print("Configuration:")
+        print("="*60)
+        print(f"  Device: {config['device']}")
+        print(f"  DDP: {IS_DDP} (World Size: {WORLD_SIZE})")
+        print(f"  Batch size per GPU: {BATCH_SIZE}")
+        print(f"  Total Batch size: {BATCH_SIZE * WORLD_SIZE}")
+        print(f"  Learning rate: {LR}")
+        print(f"  Image size: {IMG_SIZE}")
+        print(f"  Input channels: {IN_CHANNELS} ({'RGB' if IN_CHANNELS == 3 else 'Grayscale'})")
+        print(f"  Mask mode: {MASK_MODE}")
+        print(f"  Use MSSA: {USE_MSSA}")
+        if USE_MSSA:
+            print(f"  MSSA scales: {MSSA_SCALES}")
+        print(f"  NUM_STEPS: {NUM_STEPS}")
+        print(f"  Curriculum learning: {USE_CURRICULUM}")
+        print(f"  Gradient Checkpointing: {GRADIENT_CHECKPOINTING}")
+        print(f"  WandB logging: {WANDB_AVAILABLE}")
+        print("="*60 + "\n")
 
     processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-handwritten")
     PAD_IDX = processor.tokenizer.pad_token_id
@@ -442,6 +494,10 @@ def train():
         ]
     )
 
+    # Samplers for DDP
+    train_sampler = DistributedSampler(train_ds, shuffle=True) if IS_DDP else None
+    val_sampler = DistributedSampler(val_ds, shuffle=False) if IS_DDP else None
+
     # Data Collator for dynamic padding
     data_collator = WikiTextDataCollator(processor, max_length=MAX_CHARS)
 
@@ -453,7 +509,9 @@ def train():
         persistent_workers=True,
         pin_memory=True,
         drop_last=True,
-        collate_fn=data_collator
+        collate_fn=data_collator,
+        sampler=train_sampler,
+        shuffle=(train_sampler is None), # Shuffle only if no sampler
     )
 
     val_loader = DataLoader(
@@ -464,7 +522,9 @@ def train():
         persistent_workers=True,
         pin_memory=True,
         drop_last=True,
-        collate_fn=data_collator
+        collate_fn=data_collator,
+        sampler=val_sampler,
+        shuffle=False, 
     )
 
     # ============================================
@@ -490,13 +550,19 @@ def train():
 
     # Compile model if requested
     if args.compile:
-        print("[Torch.Compile] Compiling model... (backend='inductor')")
+        if is_main_process():
+            print("[Torch.Compile] Compiling model... (backend='inductor')")
         model = torch.compile(model, backend="inductor")
 
+    # Wrap DDP
+    if IS_DDP:
+        model = DDP(model, device_ids=[config["local_rank"]])
+
     # Print model summary
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Model parameters: {total_params:,} total, {trainable_params:,} trainable")
+    if is_main_process():
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Model parameters: {total_params:,} total, {trainable_params:,} trainable")
 
     # ============================================
     # LOSS, OPTIMIZER, SCHEDULER
@@ -578,6 +644,26 @@ def train():
             
             eval_pbar.set_postfix({"L": f"{loss.item():.3f}", "A": f"{acc.item():.1%}", "C": f"{cer:.1%}"})
         
+        if IS_DDP:
+            # Aggregate metrics across processes
+            metrics = torch.tensor([eval_loss, eval_acc, eval_cer, n_batches], device=config["device"])
+            torch.distributed.all_reduce(metrics)
+            
+            # Divide by world size? 
+            # Actually, we summed totals. If each process did n_batches, total batches is sum(n_batches_all)
+            # We should sum the totals then divide by total batches.
+            # But here eval_loss is sum of losses.
+            # Let's just average the averages. Simpler.
+            # Better: all_reduce sum, then compute pool.
+            
+            # Simple averaging for reporting
+            avg_loss = metrics[0] / metrics[3]
+            avg_acc = metrics[1] / metrics[3]
+            avg_cer = metrics[2] / metrics[3]
+            avg_ppl = compute_perplexity(avg_loss.item())
+            
+            return avg_loss.item(), avg_acc.item(), avg_cer.item(), avg_ppl, scheduler.get_last_lr()[0]
+
         avg_loss = eval_loss / max(1, n_batches)
         avg_acc = eval_acc / max(1, n_batches)
         avg_cer = eval_cer / max(1, n_batches)
@@ -617,34 +703,42 @@ def train():
         print("="*60 + "\n", flush=True)
 
     # ============================================
-    # SANITY CHECK
+    # SANITY CHECK (Rank 0 only)
     # ============================================
-    print("="*60)
-    print("Sanity Check: Test de génération avant entraînement...")
-    print("="*60)
-    try:
-        model.eval()
-        with torch.no_grad():
-            first_batch = next(iter(train_loader))
-            src0 = first_batch["pixel_values"].to(config["device"], non_blocking=True)[0]
-            labels0 = first_batch["labels"].to(config["device"], non_blocking=True)[0]
-            _ys, _attn, _out = model.greedy_decode(
-                src=src0,
-                max_len=labels0.size(0),
-                start_symbol=START_IDX,
-                eos_idx=EOS_IDX,
-                pad_idx=PAD_IDX,
-                device=config["device"],
-            )
-            gen_str = processor.decode(trim_to_eos(_ys[0], EOS_IDX).tolist(), skip_special_tokens=True)
-            gt_str = processor.decode(trim_to_eos(labels0, EOS_IDX).tolist(), skip_special_tokens=True)
-            print(f"✅ Sanity check PASSED")
-            print(f"   Ground Truth: {gt_str}")
-            print(f"   Generated (random init): {gen_str}", flush=True)
-    except Exception as e:
-        print(f"❌ Sanity check FAILED: {e}")
-        raise
-    print("="*60 + "\n")
+    if is_main_process():
+        print("="*60)
+        print("Sanity Check: Test de génération avant entraînement...")
+        print("="*60)
+        try:
+            model_eval = model.module if IS_DDP else model
+            model_eval.eval()
+            with torch.no_grad():
+                # Note: DataLoader is distributed, so just take one batch
+                first_batch = next(iter(train_loader))
+                src0 = first_batch["pixel_values"].to(config["device"], non_blocking=True)[0]
+                labels0 = first_batch["labels"].to(config["device"], non_blocking=True)[0]
+                _ys, _attn, _out = model_eval.greedy_decode(
+                    src=src0,
+                    max_len=labels0.size(0),
+                    start_symbol=START_IDX,
+                    eos_idx=EOS_IDX,
+                    pad_idx=PAD_IDX,
+                    device=config["device"],
+                )
+                gen_str = processor.decode(trim_to_eos(_ys[0], EOS_IDX).tolist(), skip_special_tokens=True)
+                gt_str = processor.decode(trim_to_eos(labels0, EOS_IDX).tolist(), skip_special_tokens=True)
+                print(f"✅ Sanity check PASSED")
+                print(f"   Ground Truth: {gt_str}")
+                print(f"   Generated (random init): {gen_str}", flush=True)
+            model.train() # Reset to train mode
+        except Exception as e:
+            print(f"❌ Sanity check FAILED: {e}")
+            raise
+        print("="*60 + "\n")
+    
+    # Barrier to wait for rank 0 check
+    if IS_DDP:
+        torch.distributed.barrier()
 
     # ============================================
     # TRAINING LOOP
@@ -652,16 +746,17 @@ def train():
     global_step = 0
     best_val = float("inf")
 
-    print("="*60)
-    print("Début de l'entraînement")
-    print("="*60)
-    print(f"Total steps: {total_steps}")
-    print(f"Batch size: {BATCH_SIZE}")
-    print(f"Learning rate: {LR} (warmup 10%, cosine decay)")
-    print(f"Gradient clipping: {GRAD_CLIP_NORM}")
-    print(f"Weight decay: {WEIGHT_DECAY}")
-    print(f"Label smoothing: 0.1")
-    print("="*60 + "\n", flush=True)
+    if is_main_process():
+        print("="*60)
+        print("Début de l'entraînement")
+        print("="*60)
+        print(f"Total steps: {total_steps}")
+        print(f"Batch size: {BATCH_SIZE} (per GPU)")
+        print(f"Learning rate: {LR} (warmup 10%, cosine decay)")
+        print(f"Gradient clipping: {GRAD_CLIP_NORM}")
+        print(f"Weight decay: {WEIGHT_DECAY}")
+        print(f"Label smoothing: 0.1")
+        print("="*60 + "\n", flush=True)
 
     # Check all params are in optimizer
     model_params = set(model.parameters())
@@ -670,10 +765,13 @@ def train():
         optimizer_params.update(group['params'])
 
     missing = model_params - optimizer_params
+    missing = model_params - optimizer_params
     if missing:
-        print(f"❌ {len(missing)} paramètres ne sont PAS dans l'optimizer!")
+        if is_main_process():
+            print(f"❌ {len(missing)} paramètres ne sont PAS dans l'optimizer!")
     else:
-        print("✅ Tous les paramètres sont dans l'optimizer")
+        if is_main_process():
+            print("✅ Tous les paramètres sont dans l'optimizer")
 
     # ============================================
     # RESUME FROM CHECKPOINT
@@ -682,13 +780,23 @@ def train():
     start_epoch = 1
     
     if os.path.exists(ckpt_path):
-        print(f"\n{'='*60}")
-        print(f"🔄 Checkpoint trouvé: {ckpt_path}")
-        print("Chargement en cours...")
+        if is_main_process():
+            print(f"\n{'='*60}")
+            print(f"🔄 Checkpoint trouvé: {ckpt_path}")
+            print("Chargement en cours...")
         
+        # Load map_location to cpu or specific device to avoid OOM
         checkpoint = torch.load(ckpt_path, map_location=config["device"])
+        
+        # If DDP, looking for "module." prefix in keys usually handled by load_state_dict automatically?
+        # Typically if saving DDP model, keys have "module.". If loading into DDP model, it works.
+        # If loading non-DDP checkpoint into DDP model, might need adjustment.
+        # Or if loading DDP checkpoint into non-DDP model.
+        # We assume checkpoints are compatible re: keys. 
+        
         msg = model.load_state_dict(checkpoint["model"], strict=False)
-        print(f"Model loaded: {msg}")
+        if is_main_process():
+            print(f"Model loaded: {msg}")
         
         if "optimizer" in checkpoint and checkpoint["optimizer"] is not None:
             optimizer.load_state_dict(checkpoint["optimizer"])
@@ -696,7 +804,8 @@ def train():
             
         if "scheduler" in checkpoint and checkpoint["scheduler"] is not None:
             scheduler.load_state_dict(checkpoint["scheduler"])
-            print("Scheduler loaded")
+            if is_main_process():
+                print("Scheduler loaded")
             
         global_step = checkpoint.get("step", 0)
         best_val = checkpoint.get("val_loss", float("inf"))
@@ -705,21 +814,27 @@ def train():
         if steps_per_epoch > 0:
             start_epoch = (global_step // steps_per_epoch) + 1
             
-        print(f"Resuming from step {global_step} (Epoch {start_epoch}), Best Val Loss: {best_val:.4f}")
-        print(f"{'='*60}\n", flush=True)
+        if is_main_process():
+            print(f"Resuming from step {global_step} (Epoch {start_epoch}), Best Val Loss: {best_val:.4f}")
+            print(f"{'='*60}\n", flush=True)
     else:
-        print(f"\n⚠️ Aucun checkpoint trouvé à {ckpt_path}. Démarrage de zéro.\n", flush=True)
+        if is_main_process():
+            print(f"\n⚠️ Aucun checkpoint trouvé à {ckpt_path}. Démarrage de zéro.\n", flush=True)
 
     for epoch in range(start_epoch, NUM_EPOCHS + 1):
         model.train()
         running_loss = 0.0
         running_acc = 0.0
         t0 = time.time()
+        if IS_DDP:
+            train_loader.sampler.set_epoch(epoch)
+
         pbar = tqdm(
             train_loader, 
             total=len(train_loader), 
             desc=f"Epoch {epoch}/{NUM_EPOCHS}", 
-            unit="batch"
+            unit="batch",
+            disable=not is_main_process()
         )
         
         for batch in pbar:
@@ -783,7 +898,7 @@ def train():
                     "train/perplexity": current_ppl,
                     "train/grad_norm": grad_norm,
                     "train/learning_rate": current_lr,
-                    "train/batch_size": BATCH_SIZE,
+                    "train/batch_size": BATCH_SIZE * WORLD_SIZE if IS_DDP else BATCH_SIZE,
                     "train/avg_chars": avg_chars_per_sample,
                     "train/epoch": epoch,
                 }, step=global_step)
@@ -809,72 +924,79 @@ def train():
 
             if global_step % EVAL_EVERY == 0:
                 val_loss, val_acc, val_cer, val_ppl, cur_lr = evaluate()
-                print(f"\n{'='*60}")
-                print(f"📊 Evaluation @ step {global_step}/{total_steps}")
-                print(f"   Val Loss: {val_loss:.4f}")
-                print(f"   Val Acc : {val_acc:.2%}")
-                print(f"   Val CER : {val_cer:.2%}")
-                print(f"   Val PPL : {val_ppl:.1f}")
-                print(f"   Learning Rate: {cur_lr:.2e}")
-                print(f"{'='*60}\n", flush=True)
                 
-                # Log validation metrics
-                log_metrics({
-                    "val/loss": val_loss,
-                    "val/accuracy": val_acc,
-                    "val/cer": val_cer,
-                    "val/perplexity": val_ppl,
-                }, step=global_step)
-                
-                if val_loss < best_val:
-                    best_val = val_loss
-                    os.makedirs("checkpoints", exist_ok=True)
-                    ckpt_path = "checkpoints/spikeformer2_best.pt"
-                    torch.save({
-                        "model": model.state_dict(), 
-                        "optimizer": optimizer.state_dict(), 
-                        "scheduler": scheduler.state_dict(),
-                        "step": global_step,
-                        "val_loss": val_loss,
-                        "val_acc": val_acc,
-                        "val_cer": val_cer,
-                        "val_ppl": val_ppl,
-                        "config": {
-                            "emb_size": EMB_SIZE,
-                            "nhead": NHEAD,
-                            "num_encoder_layers": NUM_ENCODER_LAYERS,
-                            "num_decoder_layers": NUM_DECODER_LAYERS,
-                            "vocab_size": VOCAB_SIZE,
-                            "mask_mode": MASK_MODE,
-                            "use_mssa": USE_MSSA,
-                            "mssa_scales": MSSA_SCALES,
-                            "in_channels": IN_CHANNELS,
-                            "num_steps": NUM_STEPS,
-                        }
-                    }, ckpt_path)
-                    print(f"✅ Saved best checkpoint to {ckpt_path} (val_loss: {val_loss:.4f})\n")
+                # Report metrics (Rank 0 only)
+                if is_main_process():
+                    print(f"\n{'='*60}")
+                    print(f"📊 Evaluation @ step {global_step}/{total_steps}")
+                    print(f"   Val Loss: {val_loss:.4f}")
+                    print(f"   Val Acc : {val_acc:.2%}")
+                    print(f"   Val CER : {val_cer:.2%}")
+                    print(f"   Val PPL : {val_ppl:.1f}")
+                    print(f"   Learning Rate: {cur_lr:.2e}")
+                    print(f"{'='*60}\n", flush=True)
                     
-                    # Log best model to WandB
-                    if WANDB_AVAILABLE and wandb is not None:
-                        wandb.run.summary["best_val_loss"] = val_loss
-                        wandb.run.summary["best_val_cer"] = val_cer
-                        wandb.run.summary["best_val_ppl"] = val_ppl
+                    # Log validation metrics
+                    log_metrics({
+                        "val/loss": val_loss,
+                        "val/accuracy": val_acc,
+                        "val/cer": val_cer,
+                        "val/perplexity": val_ppl,
+                    }, step=global_step)
+                    
+                    if val_loss < best_val:
+                        best_val = val_loss
+                        os.makedirs("checkpoints", exist_ok=True)
+                        ckpt_path = "checkpoints/spikeformer2_best.pt"
+                        torch.save({
+                            "model": model.state_dict(), 
+                            "optimizer": optimizer.state_dict(), 
+                            "scheduler": scheduler.state_dict(),
+                            "step": global_step,
+                            "val_loss": val_loss,
+                            "val_acc": val_acc,
+                            "val_cer": val_cer,
+                            "val_ppl": val_ppl,
+                            "config": {
+                                "emb_size": EMB_SIZE,
+                                "nhead": NHEAD,
+                                "num_encoder_layers": NUM_ENCODER_LAYERS,
+                                "num_decoder_layers": NUM_DECODER_LAYERS,
+                                "vocab_size": VOCAB_SIZE,
+                                "mask_mode": MASK_MODE,
+                                "use_mssa": USE_MSSA,
+                                "mssa_scales": MSSA_SCALES,
+                                "in_channels": IN_CHANNELS,
+                                "num_steps": NUM_STEPS,
+                            }
+                        }, ckpt_path)
+                        print(f"✅ Saved best checkpoint to {ckpt_path} (val_loss: {val_loss:.4f})\n")
+                        
+                        # Log best model to WandB
+                        if WANDB_AVAILABLE and wandb is not None:
+                            wandb.run.summary["best_val_loss"] = val_loss
+                            wandb.run.summary["best_val_cer"] = val_cer
+                            wandb.run.summary["best_val_ppl"] = val_ppl
                 
                 model.train()
 
         epoch_time = time.time() - t0
-        print(f"\n{'='*60}")
-        print(f"Epoch {epoch} completed in {epoch_time/60:.1f} min")
-        print(f"{'='*60}\n", flush=True)
+        if is_main_process():
+            print(f"\n{'='*60}")
+            print(f"Epoch {epoch} completed in {epoch_time/60:.1f} min")
+            print(f"{'='*60}\n", flush=True)
 
-    print("="*60)
-    print("✅ Training completed successfully!")
-    print(f"Best validation loss: {best_val:.4f}")
-    print("="*60, flush=True)
+    if is_main_process():
+        print("="*60)
+        print("✅ Training completed successfully!")
+        print(f"Best validation loss: {best_val:.4f}")
+        print("="*60, flush=True)
     
     # Finish WandB
     finish_wandb()
 
+
+    cleanup_ddp()
 
 if __name__ == "__main__":
     train()
