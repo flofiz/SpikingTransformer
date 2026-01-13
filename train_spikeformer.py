@@ -304,7 +304,11 @@ def parse_args():
     # Optimization
     parser.add_argument("--no_gradient_checkpointing", action="store_false", dest="gradient_checkpointing",
                         help="Disable gradient checkpointing (enabled by default)")
+    parser.add_argument("--no_gradient_checkpointing", action="store_false", dest="gradient_checkpointing",
+                        help="Disable gradient checkpointing (enabled by default)")
     parser.set_defaults(gradient_checkpointing=True)
+
+    parser.add_argument("--compile", action="store_true", help="Enable torch.compile() for faster training")
     
     # Image config - State-of-the-art sizes for OCR
     parser.add_argument("--img_height", type=int, default=64, help="Image height (SotA: 64 for text lines)")
@@ -484,6 +488,11 @@ def train():
         img_height=IMG_SIZE[0],    # New: image height for channel computation
         gradient_checkpointing=GRADIENT_CHECKPOINTING, # New: gradient checkpointing
     ).to(config["device"])
+
+    # Compile model if requested
+    if args.compile:
+        print("[Torch.Compile] Compiling model... (backend='inductor')")
+        model = torch.compile(model, backend="inductor")
 
     # Print model summary
     total_params = sum(p.numel() for p in model.parameters())
