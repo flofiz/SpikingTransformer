@@ -15,6 +15,7 @@ from torchvision import transforms
 from datasets import load_dataset
 import torchvision.transforms.functional as TF
 import torch.nn.functional as F
+from functools import lru_cache
 
 
 # Configuration du logger
@@ -35,6 +36,13 @@ FONT_TEST_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012345678
 
 # Default cache file path
 DEFAULT_FONT_CACHE = "valid_fonts.json"
+
+# Pre-compiled Regex Patterns for optimization
+RE_WHITESPACE = re.compile(r"\s+")
+RE_SENTENCE_SPLIT = re.compile(r"[.!?;]\s+")
+RE_BRACKETS = re.compile(r"\[[^\]]*\]")
+RE_PARENTHESES = re.compile(r"\([^)]*\)")
+RE_SUB_SEGMENTS = re.compile(r",\s+|:\s+|\s+et\s+|\s+ou\s+|\s+mais\s+|\s+donc\s+|\s+car\s+")
 
 
 def _validate_single_font(args) -> Tuple[str, bool]:
@@ -259,6 +267,12 @@ def get_font_pool(
     return _FONT_POOL_CACHE
 
 
+@lru_cache(maxsize=1024)
+def _get_cached_font(font_path: str, size: int) -> ImageFont.FreeTypeFont:
+    """Cached font loading to avoid repeated disk I/O."""
+    return ImageFont.truetype(font_path, size=size)
+
+
 def get_random_font(size: int = 28, pool: Optional[List[str]] = None) -> ImageFont.FreeTypeFont:
     """
     Returns a random font from the pool.
@@ -280,13 +294,13 @@ def get_random_font(size: int = 28, pool: Optional[List[str]] = None) -> ImageFo
     font_path = random.choice(pool)
     
     try:
-        return ImageFont.truetype(font_path, size=size)
+        return _get_cached_font(font_path, size)
     except Exception:
         # If selected font fails, try another
         for _ in range(3):  # Try up to 3 times
             font_path = random.choice(pool)
             try:
-                return ImageFont.truetype(font_path, size=size)
+                return _get_cached_font(font_path, size)
             except Exception:
                 continue
         return ImageFont.load_default()
@@ -324,7 +338,7 @@ def _find_font(candidates: Optional[List[str]] = None, size: int = 28) -> ImageF
     for fp in candidates:
         if os.path.exists(fp):
             try:
-                return ImageFont.truetype(fp, size=size)
+                return _get_cached_font(fp, size)
             except Exception:
                 pass
     
@@ -349,7 +363,7 @@ def _clean_and_split_sentences(
     Returns:
         Liste de segments de texte uniques
     """
-    text = re.sub(r"\s+", " ", text).strip()
+    text = RE_WHITESPACE.sub(" ", text).strip()
     if not text:
         return []
     
@@ -364,11 +378,11 @@ def _clean_and_split_sentences(
             out.append(segment)
     
     # Stratégie 1: Split par phrases (ponctuation forte)
-    sentences = re.split(r"[.!?;]\s+", text)
+    sentences = RE_SENTENCE_SPLIT.split(text)
     for s in sentences:
         s = s.strip()
-        s = re.sub(r"\[[^\]]*\]", "", s)  # Supprime [références]
-        s = re.sub(r"\([^)]*\)", "", s)    # Supprime (parenthèses)
+        s = RE_BRACKETS.sub("", s)  # Supprime [références]
+        s = RE_PARENTHESES.sub("", s)    # Supprime (parenthèses)
         s = s.strip()
         
         if min_chars <= len(s) <= max_chars:
@@ -376,10 +390,7 @@ def _clean_and_split_sentences(
         
         # Stratégie 2: Split par virgules et conjonctions (pour phrases longues)
         elif len(s) > max_chars:
-            sub_segments = re.split(
-                r",\s+|:\s+|\s+et\s+|\s+ou\s+|\s+mais\s+|\s+donc\s+|\s+car\s+", 
-                s
-            )
+            sub_segments = RE_SUB_SEGMENTS.split(s)
             for sub in sub_segments:
                 add_unique(sub)
                 
@@ -402,8 +413,8 @@ def _clean_and_split_sentences(
         
         for i in range(0, len(words) - chunk_words + 1, step):
             chunk = " ".join(words[i:i + chunk_words])
-            chunk = re.sub(r"\[[^\]]*\]", "", chunk)
-            chunk = re.sub(r"\([^)]*\)", "", chunk)
+            chunk = RE_BRACKETS.sub("", chunk)
+            chunk = RE_PARENTHESES.sub("", chunk)
             add_unique(chunk)
     
     return out
@@ -532,32 +543,40 @@ def pil_to_tensor_resize_pad(
 
     resized = img.resize((new_w, new_h), resample=resample)
 
-    tensor = TF.to_tensor(resized)  # Shape: (C, new_h, new_w)
-    mask = torch.ones((new_h, new_w), dtype=torch.float32)
-
+    # Optimization: Direct allocation instead of padding
+    # This avoids creating multiple intermediate tensors
+    
     pad_w = target_w - new_w
     pad_h = target_h - new_h
     
     if pad_w < 0 or pad_h < 0:
+        # Downscale completely if larger than target (should rarely happen with scale logic)
         resized = resized.resize((target_w, target_h), resample=resample)
         tensor = TF.to_tensor(resized)
         mask = torch.ones((target_h, target_w), dtype=torch.float32)
     else:
+        # Convert resized image to tensor
+        resized_tensor = TF.to_tensor(resized)  # (C, new_h, new_w)
+        
+        # Calculate padding offsets
         pad_left = pad_w // 2
-        pad_right = pad_w - pad_left
         pad_top = pad_h // 2
-        pad_bottom = pad_h - pad_top
         
-        # Padding: (left, right, top, bottom) for F.pad
-        pad_tuple = (pad_left, pad_right, pad_top, pad_bottom)
+        # Get channel dim
+        c_dim = resized_tensor.shape[0] if len(resized_tensor.shape) == 3 else 1
         
-        if any(p > 0 for p in pad_tuple):
-            tensor = F.pad(tensor, pad_tuple, mode="constant", value=float(pad_value))
+        # Allocate final tensors directly using full/zeros
+        tensor = torch.full((c_dim, target_h, target_w), float(pad_value), dtype=resized_tensor.dtype)
+        mask = torch.zeros((target_h, target_w), dtype=torch.float32)
+        
+        # Insert image into center
+        if len(resized_tensor.shape) == 3:
+            tensor[:, pad_top:pad_top+new_h, pad_left:pad_left+new_w] = resized_tensor
+        else:
+            tensor[0, pad_top:pad_top+new_h, pad_left:pad_left+new_w] = resized_tensor
             
-            # Padding the mask with same convention
-            mask = mask.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
-            mask = F.pad(mask, pad_tuple, mode="constant", value=0.0)
-            mask = mask.squeeze(0).squeeze(0)  # Back to (H, W)
+        # Insert mask into center (ones where image is)
+        mask[pad_top:pad_top+new_h, pad_left:pad_left+new_w] = 1.0
 
     if normalize:
         # Adjust mean/std for number of channels

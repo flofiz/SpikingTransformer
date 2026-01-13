@@ -376,7 +376,7 @@ def train():
     LOG_EVERY = 100
     EVAL_EVERY = 2000
     LOG_PRINT_EVERY = 1000
-    MAX_CHARS = 128 
+    MAX_CHARS = 80 
     GRAD_CLIP_NORM = 1.0
     WEIGHT_DECAY = 0.01
     MASK_MODE = args.mask_mode
@@ -458,7 +458,7 @@ def train():
         split="train",
         img_size=IMG_SIZE,
         train=True,
-        max_samples=100_000,
+        max_samples=50_000_000,
         max_chars=MAX_CHARS,
         cache_size=100,
         article_rotation_interval=500_000,
@@ -498,7 +498,7 @@ def train():
         drop_last=True,
         collate_fn=data_collator,
         sampler=train_sampler,
-        shuffle=(sampler is None), 
+        shuffle=(train_sampler is None), 
     )
 
     val_loader = DataLoader(
