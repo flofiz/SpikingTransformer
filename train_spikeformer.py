@@ -304,8 +304,7 @@ def parse_args():
     # Optimization
     parser.add_argument("--no_gradient_checkpointing", action="store_false", dest="gradient_checkpointing",
                         help="Disable gradient checkpointing (enabled by default)")
-    parser.add_argument("--no_gradient_checkpointing", action="store_false", dest="gradient_checkpointing",
-                        help="Disable gradient checkpointing (enabled by default)")
+
     parser.set_defaults(gradient_checkpointing=True)
 
     parser.add_argument("--compile", action="store_true", help="Enable torch.compile() for faster training")
