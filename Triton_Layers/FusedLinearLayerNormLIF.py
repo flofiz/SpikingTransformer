@@ -97,20 +97,20 @@ def fused_linear_layernorm_forward_kernel(
         
         # Dot product: sum over input dimension
         for k in range(0, D_IN):
-            # Load input value (scalar, broadcast)
-            x_val = tl.load(input_row_ptr + k * stride_in_d)
+            # Load input value (scalar, broadcast) - cast to float32 for accumulator
+            x_val = tl.load(input_row_ptr + k * stride_in_d).to(tl.float32)
             
             # Load weight row for this k (vector of D_OUT values)
             w_vals = tl.load(
                 WEIGHT_PTR + d_idx * stride_w_out + k * stride_w_in,
                 mask=d_valid,
                 other=0.0
-            )
+            ).to(tl.float32)
             
             acc += x_val * w_vals
         
-        # Add bias
-        bias_vals = tl.load(BIAS_PTR + d_idx, mask=d_valid, other=0.0)
+        # Add bias - cast to float32
+        bias_vals = tl.load(BIAS_PTR + d_idx, mask=d_valid, other=0.0).to(tl.float32)
         acc += bias_vals
         
         # Store linear output (needed for backward)
@@ -142,15 +142,15 @@ def fused_linear_layernorm_forward_kernel(
             d_idx = d_block_start + d_offsets
             d_valid = d_idx < D_OUT
             
-            # Reload linear values
-            lin_vals = tl.load(linear_row_ptr + d_idx * stride_lin_d, mask=d_valid, other=0.0)
+            # Reload linear values - cast to float32
+            lin_vals = tl.load(linear_row_ptr + d_idx * stride_lin_d, mask=d_valid, other=0.0).to(tl.float32)
             
             # Normalize
             normalized = (lin_vals - mean) * rstd
             
-            # Scale and shift
-            gamma = tl.load(GAMMA_PTR + d_idx, mask=d_valid, other=1.0)
-            beta = tl.load(BETA_PTR + d_idx, mask=d_valid, other=0.0)
+            # Scale and shift - cast to float32
+            gamma = tl.load(GAMMA_PTR + d_idx, mask=d_valid, other=1.0).to(tl.float32)
+            beta = tl.load(BETA_PTR + d_idx, mask=d_valid, other=0.0).to(tl.float32)
             output = gamma * normalized + beta
             
             tl.store(output_row_ptr + d_idx * stride_out_d, output, mask=d_valid)
@@ -196,17 +196,17 @@ def lif_forward_kernel_fused(
     v_init_base = V_MEM_INIT_PTR + pid_batch * stride_v_b
     v_final_base = V_MEM_FINAL_PTR + pid_batch * stride_v_b
     
-    beta = tl.load(BETA_PTR)
-    v_th = tl.load(V_TH_PTR)
-    v_reset = tl.load(V_RESET_PTR)
+    beta = tl.load(BETA_PTR).to(tl.float32)
+    v_th = tl.load(V_TH_PTR).to(tl.float32)
+    v_reset = tl.load(V_RESET_PTR).to(tl.float32)
     
-    v_mem = tl.load(v_init_base + neuron_offsets * stride_v_n, mask=neuron_mask, other=0.0)
+    v_mem = tl.load(v_init_base + neuron_offsets * stride_v_n, mask=neuron_mask, other=0.0).to(tl.float32)
     
     for t in range(0, T):
         current_in = tl.load(
             in_base + t * stride_in_t + neuron_offsets * stride_in_n,
             mask=neuron_mask, other=0.0
-        )
+        ).to(tl.float32)
         
         v_mem = v_mem * beta + current_in
         spike = tl.where(v_mem > v_th, 1.0, 0.0)
@@ -276,18 +276,18 @@ def lif_backward_kernel_fused(
     v_init_base = V_MEM_INIT_PTR + pid_batch * stride_v_init_b
     grad_beta_base = GRAD_BETA_NEURON_PTR + pid_batch * stride_grad_beta_b
     
-    beta = tl.load(BETA_PTR)
-    v_th = tl.load(V_TH_PTR)
-    v_reset = tl.load(V_RESET_PTR)
+    beta = tl.load(BETA_PTR).to(tl.float32)
+    v_th = tl.load(V_TH_PTR).to(tl.float32)
+    v_reset = tl.load(V_RESET_PTR).to(tl.float32)
     
     # Pass 1: Recompute membrane potential history
-    v_mem = tl.load(v_init_base + neuron_offsets * stride_v_init_n, mask=neuron_mask, other=0.0)
+    v_mem = tl.load(v_init_base + neuron_offsets * stride_v_init_n, mask=neuron_mask, other=0.0).to(tl.float32)
     
     for t in range(0, T):
         current_in = tl.load(
             input_base + t * stride_in_t + neuron_offsets * stride_in_n,
             mask=neuron_mask, other=0.0
-        )
+        ).to(tl.float32)
         v_mem = v_mem * beta + current_in
         tl.store(
             v_hist_base + t * stride_v_hist_t + neuron_offsets * stride_v_hist_n,
@@ -296,14 +296,14 @@ def lif_backward_kernel_fused(
         spike_t = tl.load(
             spike_base + t * stride_out_t + neuron_offsets * stride_out_n,
             mask=neuron_mask, other=0.0
-        )
+        ).to(tl.float32)
         v_mem = tl.where(spike_t > 0.0, v_reset, v_mem)
     
     # Pass 2: Backward propagation
     grad_state = tl.load(
         GRAD_V_FINAL_PTR + pid_batch * stride_grad_v_b + neuron_offsets * stride_grad_v_n,
         mask=neuron_mask, other=0.0
-    )
+    ).to(tl.float32)
     
     grad_beta_accumulator = tl.zeros(neuron_offsets.shape, dtype=tl.float32)
     
@@ -311,15 +311,15 @@ def lif_backward_kernel_fused(
         v_mem_t = tl.load(
             v_hist_base + t * stride_v_hist_t + neuron_offsets * stride_v_hist_n,
             mask=neuron_mask, other=0.0
-        )
+        ).to(tl.float32)
         spike_t = tl.load(
             spike_base + t * stride_out_t + neuron_offsets * stride_out_n,
             mask=neuron_mask, other=0.0
-        )
+        ).to(tl.float32)
         grad_spike = tl.load(
             grad_out_base + t * stride_grad_out_t + neuron_offsets * stride_grad_out_n,
             mask=neuron_mask, other=0.0
-        )
+        ).to(tl.float32)
         
         v_over_th = v_mem_t - v_th
         grad_surrogate = superspike_surrogate_grad(v_over_th, K_SUPERSPIKE)
@@ -338,17 +338,17 @@ def lif_backward_kernel_fused(
             v_prev_pre_spike = tl.load(
                 v_hist_base + (t - 1) * stride_v_hist_t + neuron_offsets * stride_v_hist_n,
                 mask=neuron_mask, other=0.0
-            )
+            ).to(tl.float32)
             spike_prev = tl.load(
                 spike_base + (t - 1) * stride_out_t + neuron_offsets * stride_out_n,
                 mask=neuron_mask, other=0.0
-            )
+            ).to(tl.float32)
             v_prev_post_spike = tl.where(spike_prev > 0.0, v_reset, v_prev_pre_spike)
         else:
             v_prev_post_spike = tl.load(
                 v_init_base + neuron_offsets * stride_v_init_n,
                 mask=neuron_mask, other=0.0
-            )
+            ).to(tl.float32)
         
         grad_beta_accumulator += grad_v * v_prev_post_spike
         grad_state = grad_v * beta
@@ -434,12 +434,12 @@ def fused_linear_layernorm_backward_kernel(
         grad_out = tl.load(
             GRAD_OUTPUT_PTR + row_idx * stride_grad_out_row + d_idx * stride_grad_out_d,
             mask=d_valid, other=0.0
-        )
-        gamma = tl.load(GAMMA_PTR + d_idx, mask=d_valid, other=1.0)
+        ).to(tl.float32)
+        gamma = tl.load(GAMMA_PTR + d_idx, mask=d_valid, other=1.0).to(tl.float32)
         lin_out = tl.load(
             LINEAR_OUT_PTR + row_idx * stride_lin_row + d_idx * stride_lin_d,
             mask=d_valid, other=0.0
-        )
+        ).to(tl.float32)
         
         normalized = (lin_out - mean) * rstd
         grad_gamma_contrib = grad_out * normalized
@@ -469,12 +469,12 @@ def fused_linear_layernorm_backward_kernel(
         grad_out = tl.load(
             GRAD_OUTPUT_PTR + row_idx * stride_grad_out_row + d_idx * stride_grad_out_d,
             mask=d_valid, other=0.0
-        )
-        gamma = tl.load(GAMMA_PTR + d_idx, mask=d_valid, other=1.0)
+        ).to(tl.float32)
+        gamma = tl.load(GAMMA_PTR + d_idx, mask=d_valid, other=1.0).to(tl.float32)
         lin_out = tl.load(
             LINEAR_OUT_PTR + row_idx * stride_lin_row + d_idx * stride_lin_d,
             mask=d_valid, other=0.0
-        )
+        ).to(tl.float32)
         
         normalized = (lin_out - mean) * rstd
         grad_scaled = grad_out * gamma
@@ -488,11 +488,11 @@ def fused_linear_layernorm_backward_kernel(
         # Compute gradient w.r.t. weight: grad_W[d, k] = grad_lin[d] * x[k]
         # And gradient w.r.t. input: grad_x[k] = sum_d(grad_lin[d] * W[d, k])
         for k in range(0, D_IN):
-            x_val = tl.load(INPUT_PTR + row_idx * stride_in_row + k * stride_in_d)
+            x_val = tl.load(INPUT_PTR + row_idx * stride_in_row + k * stride_in_d).to(tl.float32)
             w_val = tl.load(
                 WEIGHT_PTR + d_idx * stride_w_out + k * stride_w_in,
                 mask=d_valid, other=0.0
-            )
+            ).to(tl.float32)
             
             # Atomic add to weight gradient
             grad_w_contrib = grad_lin * x_val
@@ -518,12 +518,12 @@ def fused_linear_layernorm_backward_kernel(
             grad_out = tl.load(
                 GRAD_OUTPUT_PTR + row_idx * stride_grad_out_row + d_idx * stride_grad_out_d,
                 mask=d_valid, other=0.0
-            )
-            gamma = tl.load(GAMMA_PTR + d_idx, mask=d_valid, other=1.0)
+            ).to(tl.float32)
+            gamma = tl.load(GAMMA_PTR + d_idx, mask=d_valid, other=1.0).to(tl.float32)
             lin_out = tl.load(
                 LINEAR_OUT_PTR + row_idx * stride_lin_row + d_idx * stride_lin_d,
                 mask=d_valid, other=0.0
-            )
+            ).to(tl.float32)
             
             normalized = (lin_out - mean) * rstd
             grad_scaled = grad_out * gamma
@@ -532,7 +532,7 @@ def fused_linear_layernorm_backward_kernel(
             w_val = tl.load(
                 WEIGHT_PTR + d_idx * stride_w_out + k * stride_w_in,
                 mask=d_valid, other=0.0
-            )
+            ).to(tl.float32)
             
             grad_in_k += tl.sum(tl.where(d_valid, grad_lin * w_val, 0.0), axis=0)
         
