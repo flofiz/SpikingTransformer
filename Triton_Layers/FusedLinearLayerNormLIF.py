@@ -22,15 +22,7 @@ import math
 # Forward Kernel: Fused Linear + LayerNorm
 # =============================================================================
 
-@triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_SIZE_D': 256}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_SIZE_D': 512}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_SIZE_D': 1024}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_SIZE_D': 2048}, num_warps=16, num_stages=2),
-    ],
-    key=['D_IN', 'D_OUT'],  # Key on fixed dimensions only
-)
+# Fixed config to avoid recompilation on variable sequence lengths
 @triton.jit
 def fused_linear_layernorm_forward_kernel(
     # Input pointers
@@ -161,15 +153,7 @@ def fused_linear_layernorm_forward_kernel(
 # Reuses logic from Lif.py but adapted for fused context
 # =============================================================================
 
-@triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_SIZE_N': 128}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_SIZE_N': 256}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_SIZE_N': 512}, num_warps=16, num_stages=2),
-        triton.Config({'BLOCK_SIZE_N': 1024}, num_warps=16, num_stages=3),
-    ],
-    key=['N_NEURONS'],  # Only key on fixed dimension (d_model/d_out)
-)
+# Fixed config to avoid recompilation on variable sequence lengths
 @triton.jit
 def lif_forward_kernel_fused(
     INPUT_PTR, OUTPUT_SPIKES_PTR, V_MEM_FINAL_PTR,
@@ -232,15 +216,7 @@ def superspike_surrogate_grad(v_over_th, K: tl.constexpr):
     return 1.0 / (1.0 + K * abs_v_over_th) / (1.0 + K * abs_v_over_th)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_SIZE_N': 128}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_SIZE_N': 256}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_SIZE_N': 512}, num_warps=16, num_stages=2),
-        triton.Config({'BLOCK_SIZE_N': 1024}, num_warps=16, num_stages=3),
-    ],
-    key=['N_NEURONS'],  # Only key on fixed dimension
-)
+# Fixed config to avoid recompilation on variable sequence lengths
 @triton.jit
 def lif_backward_kernel_fused(
     GRAD_OUT_PTR, GRAD_IN_PTR, GRAD_V_FINAL_PTR,
@@ -363,15 +339,7 @@ def lif_backward_kernel_fused(
 # Backward Kernel: Fused LayerNorm + Linear Backward
 # =============================================================================
 
-@triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_SIZE_D': 256}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_SIZE_D': 512}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_SIZE_D': 1024}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_SIZE_D': 2048}, num_warps=16, num_stages=2),
-    ],
-    key=['D_IN', 'D_OUT'],  # Key on fixed dimensions only
-)
+# Fixed config to avoid recompilation on variable sequence lengths
 @triton.jit
 def fused_linear_layernorm_backward_kernel(
     # Gradient inputs (from LIF backward)
@@ -611,8 +579,9 @@ class FusedLinearLayerNormLIFFunction(torch.autograd.Function):
         mean = torch.empty(N_ROWS, dtype=torch.float32, device=input.device)
         rstd = torch.empty(N_ROWS, dtype=torch.float32, device=input.device)
         
-        # Determine if single-block mode
+        # Determine if single-block mode and set block size
         SINGLE_BLOCK = D_out <= 8192
+        BLOCK_SIZE_D = min(1024, triton.next_power_of_2(D_out))  # Fixed optimal size
         
         # Launch fused Linear+LayerNorm kernel
         grid = (N_ROWS,)
@@ -625,7 +594,10 @@ class FusedLinearLayerNormLIFFunction(torch.autograd.Function):
             output_norm.stride(0), output_norm.stride(1),
             linear_out.stride(0), linear_out.stride(1),
             eps,
+            BLOCK_SIZE_D=BLOCK_SIZE_D,
             SINGLE_BLOCK=SINGLE_BLOCK,
+            num_warps=8,
+            num_stages=2,
         )
         
         # Reshape for LIF: [T, B_eff, D_out]
@@ -637,8 +609,8 @@ class FusedLinearLayerNormLIFFunction(torch.autograd.Function):
         v_mem_final = torch.empty_like(v_mem_init)
         
         # Launch LIF forward kernel
-        BLOCK_SIZE_N_MIN = 128
-        n_blocks = (D_out + BLOCK_SIZE_N_MIN - 1) // BLOCK_SIZE_N_MIN
+        BLOCK_SIZE_N = 256  # Fixed optimal size
+        n_blocks = (D_out + BLOCK_SIZE_N - 1) // BLOCK_SIZE_N
         grid_lif = (B_eff, n_blocks)
         
         lif_forward_kernel_fused[grid_lif](
@@ -649,6 +621,9 @@ class FusedLinearLayerNormLIFFunction(torch.autograd.Function):
             lif_input.stride(0), lif_input.stride(1), lif_input.stride(2),
             output_spikes.stride(0), output_spikes.stride(1), output_spikes.stride(2),
             v_mem_init.stride(0), v_mem_init.stride(1),
+            BLOCK_SIZE_N=BLOCK_SIZE_N,
+            num_warps=8,
+            num_stages=2,
         )
         
         # Reshape output to match original shape
@@ -713,8 +688,8 @@ class FusedLinearLayerNormLIFFunction(torch.autograd.Function):
         else:
             grad_v_mem_final = grad_v_mem_final.view(B_eff, D_out).contiguous()
         
-        BLOCK_SIZE_N_MIN = 128
-        n_blocks = (D_out + BLOCK_SIZE_N_MIN - 1) // BLOCK_SIZE_N_MIN
+        BLOCK_SIZE_N = 256  # Fixed size
+        n_blocks = (D_out + BLOCK_SIZE_N - 1) // BLOCK_SIZE_N
         grid_lif = (B_eff, n_blocks)
         
         lif_backward_kernel_fused[grid_lif](
@@ -732,6 +707,9 @@ class FusedLinearLayerNormLIFFunction(torch.autograd.Function):
             output_spikes.stride(0), output_spikes.stride(1), output_spikes.stride(2),
             v_mem_init.stride(0), v_mem_init.stride(1),
             v_mem_history.stride(0), v_mem_history.stride(1), v_mem_history.stride(2),
+            BLOCK_SIZE_N=BLOCK_SIZE_N,
+            num_warps=8,
+            num_stages=2,
         )
         
         grad_beta_lif = grad_beta_per_neuron.sum()
@@ -748,6 +726,7 @@ class FusedLinearLayerNormLIFFunction(torch.autograd.Function):
         grad_beta_ln = torch.zeros_like(beta_ln)
         
         # Launch backward kernel
+        BLOCK_SIZE_D = min(1024, triton.next_power_of_2(D_out))  # Fixed optimal size
         grid = (N_ROWS,)
         fused_linear_layernorm_backward_kernel[grid](
             grad_ln_output,
@@ -760,6 +739,9 @@ class FusedLinearLayerNormLIFFunction(torch.autograd.Function):
             weight.stride(0), weight.stride(1),
             grad_input.stride(0), grad_input.stride(1),
             grad_weight.stride(0), grad_weight.stride(1),
+            BLOCK_SIZE_D=BLOCK_SIZE_D,
+            num_warps=8,
+            num_stages=2,
         )
         
         # Reshape grad_input to match original shape
