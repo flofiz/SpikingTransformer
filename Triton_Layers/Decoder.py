@@ -1,6 +1,7 @@
 from .SSA import SSAMultiHeadAttention, MultiScaleXNORAttention
 from .SpikingMLP import SpikingMLP
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 from typing import Literal
 
 class DecoderLayer(nn.Module):
@@ -105,9 +106,11 @@ class Decoder(nn.Module):
         n_steps: int = 10,
         mask_mode: Literal["multiply", "additive"] = "multiply",
         use_mssa: bool = False,
-        mssa_scales: list = [1, 2, 4]
+        mssa_scales: list = [1, 2, 4],
+        gradient_checkpointing: bool = True
     ):
         super().__init__()
+        self.gradient_checkpointing = gradient_checkpointing
         
         self.layers = nn.ModuleList()
         for i in range(num_layers):
@@ -130,5 +133,10 @@ class Decoder(nn.Module):
     def forward(self, x, enc_output, mask=None):
         # x: [T, B, N, D]
         for layer in self.layers:
-            x = layer(x, enc_output, mask=mask)
+            if self.gradient_checkpointing and self.training:
+                def custom_forward(x_in, enc_in, mask_in):
+                    return layer(x_in, enc_in, mask=mask_in)
+                x = checkpoint(custom_forward, x, enc_output, mask, use_reentrant=False)
+            else:
+                x = layer(x, enc_output, mask=mask)
         return x
