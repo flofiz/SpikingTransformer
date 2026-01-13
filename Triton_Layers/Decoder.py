@@ -2,6 +2,7 @@ from .SSA import SSAMultiHeadAttention, MultiScaleXNORAttention
 from .SpikingMLP import SpikingMLP
 import torch.nn as nn
 from typing import Literal
+import torch
 
 class DecoderLayer(nn.Module):
     """
