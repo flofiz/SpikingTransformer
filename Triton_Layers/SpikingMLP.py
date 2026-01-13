@@ -58,7 +58,8 @@ class SpikingMLP(nn.Module):
         
         if self.use_fused:
             # Flatten for fused kernel: [T, B, N, D] -> [T*B*N, D]
-            x_flat = x.view(-1, self.d_model)
+            # Use reshape instead of view for non-contiguous tensors
+            x_flat = x.reshape(-1, self.d_model)
             
             # Expand: d_model -> ff_dim
             x_flat, _ = self.expand_fused(x_flat)
@@ -67,7 +68,7 @@ class SpikingMLP(nn.Module):
             x_flat, _ = self.compress_fused(x_flat)
             
             # Reshape back
-            x = x_flat.view(original_shape)
+            x = x_flat.reshape(original_shape)
         else:
             # Original: separate Linear -> LayerNorm -> LIF
             x = self.expand(x)         # pointwise linear on last dim

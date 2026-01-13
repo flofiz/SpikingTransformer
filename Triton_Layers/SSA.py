@@ -250,17 +250,18 @@ class SSAMultiHeadAttention(nn.Module):
         if self.use_fused:
             # Fused: flatten -> fused projection -> reshape back
             # Input: [B, N, D] -> [B*N, D] for fused kernel
-            Q_flat = query.view(B * N, D)
-            K_flat = key.view(B_k * N_k, D_k)
-            V_flat = value.view(B_k * N_k, D_k)
+            # Use reshape instead of view for non-contiguous tensors
+            Q_flat = query.reshape(B * N, D)
+            K_flat = key.reshape(B_k * N_k, D_k)
+            V_flat = value.reshape(B_k * N_k, D_k)
             
             Q, _ = self.q_fused(Q_flat)
             K, _ = self.k_fused(K_flat)
             V, _ = self.v_fused(V_flat)
             
-            Q = Q.view(B, N, D)
-            K = K.view(B_k, N_k, D_k)
-            V = V.view(B_k, N_k, D_k)
+            Q = Q.reshape(B, N, D)
+            K = K.reshape(B_k, N_k, D_k)
+            V = V.reshape(B_k, N_k, D_k)
         else:
             # Original: separate Linear -> LayerNorm -> LIF
             Q = self.q_proj(query)
@@ -275,9 +276,9 @@ class SSAMultiHeadAttention(nn.Module):
             V = self.lnv(V)
             V, _ = self.lifv(V)
 
-        Q = Q.view(B, N, self.n_heads, self.d_head).transpose(1, 2)  # (B, H, N, Dh)
-        K = K.view(B, N_k, self.n_heads, self.d_head).transpose(1, 2) # (B, H, N_k, Dh)
-        V = V.view(B, N_k, self.n_heads, self.d_head).transpose(1, 2) # (B, H, N_k, Dh)
+        Q = Q.reshape(B, N, self.n_heads, self.d_head).transpose(1, 2)  # (B, H, N, Dh)
+        K = K.reshape(B, N_k, self.n_heads, self.d_head).transpose(1, 2) # (B, H, N_k, Dh)
+        V = V.reshape(B, N_k, self.n_heads, self.d_head).transpose(1, 2) # (B, H, N_k, Dh)
 
         attn_output = self.xnor_attention(Q, K)
         log_bias = self.get_log_pe_bias_cross(N, N_k, Q.device)  # (L, L)
@@ -295,13 +296,13 @@ class SSAMultiHeadAttention(nn.Module):
         attn_output = (attn_output * self.scale) @ V
 
         attn_output, _ = self.lifs(attn_output)
-        attn_output = attn_output.transpose(1, 2).contiguous().view(B, N, D)
+        attn_output = attn_output.transpose(1, 2).contiguous().reshape(B, N, D)
         
         if self.use_fused:
             # Fused output projection
-            output_flat = attn_output.view(B * N, D)
+            output_flat = attn_output.reshape(B * N, D)
             output, _ = self.o_fused(output_flat)
-            output = output.view(B, N, D)
+            output = output.reshape(B, N, D)
         else:
             output = self.out_proj(attn_output)
             output = self.lno(output)
