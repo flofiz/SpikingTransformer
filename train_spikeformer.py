@@ -128,7 +128,7 @@ def get_training_config(args):
         else:
             batch_size = 8
     
-    num_workers = 8 if batch_size >= 64 else 4
+    num_workers = 16 if batch_size >= 64 else 8
     
     return {
         "device": device,
@@ -435,7 +435,7 @@ def train():
         train_ds, 
         batch_size=BATCH_SIZE, 
         num_workers=config["num_workers"], 
-        prefetch_factor=2,
+        prefetch_factor=8,
         persistent_workers=True,
         pin_memory=True,
         drop_last=True,
