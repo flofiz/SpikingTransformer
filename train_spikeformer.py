@@ -353,6 +353,8 @@ def parse_args():
     parser.add_argument("--flora", action="store_true", help="Use Flora optimizer (requires flora-opt)")
 
     parser.add_argument("--compile", action="store_true", help="Enable torch.compile() for faster training")
+    parser.add_argument("--use_fused", action="store_true", 
+                        help="Use fused Linear-LayerNorm-LIF Triton kernels for faster training")
     
     # Image config - State-of-the-art sizes for OCR
     parser.add_argument("--img_height", type=int, default=64, help="Image height (SotA: 64 for text lines)")
@@ -399,6 +401,7 @@ def train():
     IN_CHANNELS = args.in_channels
     USE_CURRICULUM = args.use_curriculum
     GRADIENT_CHECKPOINTING = args.gradient_checkpointing
+    USE_FUSED = args.use_fused
 
     # Config DDP
     IS_DDP = config["is_ddp"]
@@ -433,6 +436,7 @@ def train():
         "in_channels": IN_CHANNELS,
         "use_curriculum": USE_CURRICULUM,
         "gradient_checkpointing": GRADIENT_CHECKPOINTING,
+        "use_fused": USE_FUSED,
         "world_size": WORLD_SIZE,
         "is_ddp": IS_DDP
     }
@@ -458,6 +462,7 @@ def train():
         print(f"  NUM_STEPS: {NUM_STEPS}")
         print(f"  Curriculum learning: {USE_CURRICULUM}")
         print(f"  Gradient Checkpointing: {GRADIENT_CHECKPOINTING}")
+        print(f"  Use Fused Kernels: {USE_FUSED}")
         print(f"  WandB logging: {WANDB_AVAILABLE}")
         print("="*60 + "\n")
 
@@ -550,6 +555,7 @@ def train():
         in_channels=IN_CHANNELS,   # New: RGB or grayscale input
         img_height=IMG_SIZE[0],    # New: image height for channel computation
         gradient_checkpointing=GRADIENT_CHECKPOINTING, # New: gradient checkpointing
+        use_fused=USE_FUSED,       # New: fused Linear-LayerNorm-LIF kernels
     ).to(config["device"])
 
     # Compile model if requested

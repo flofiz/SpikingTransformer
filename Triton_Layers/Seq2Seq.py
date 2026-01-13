@@ -59,6 +59,7 @@ class Seq2Seq(nn.Module):
         mssa_scales: Scales for MSSA
         in_channels: Number of input channels (1 for grayscale, 3 for RGB)
         img_height: Height of input images (needed for channel computation)
+        use_fused: If True, use fused Linear-LayerNorm-LIF kernels
     """
     def __init__(self,
                  patch_size: int = 16,
@@ -77,7 +78,8 @@ class Seq2Seq(nn.Module):
                  mssa_scales: List[int] = [1, 2, 4],
                  in_channels: int = 1,
                  img_height: int = 32,
-                 gradient_checkpointing: bool = False):
+                 gradient_checkpointing: bool = False,
+                 use_fused: bool = False):
         super().__init__()
         self.n_steps = n_steps
         self.mask_mode = mask_mode
@@ -102,7 +104,8 @@ class Seq2Seq(nn.Module):
             mask_mode=mask_mode,
             use_mssa=use_mssa,
             mssa_scales=mssa_scales,
-            gradient_checkpointing=gradient_checkpointing
+            gradient_checkpointing=gradient_checkpointing,
+            use_fused=use_fused
         )
         
         self.decoder = Decoder(
@@ -116,7 +119,8 @@ class Seq2Seq(nn.Module):
             mask_mode=mask_mode,
             use_mssa=use_mssa,
             mssa_scales=mssa_scales,
-            gradient_checkpointing=gradient_checkpointing
+            gradient_checkpointing=gradient_checkpointing,
+            use_fused=use_fused
         )
         self.output_layer = nn.Linear(d_model, tgt_vocab_size)
         self.lifPE = LIF(n_steps=n_steps)

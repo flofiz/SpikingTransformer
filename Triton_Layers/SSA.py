@@ -7,6 +7,13 @@ import torch.nn.functional as F
 import math
 from typing import Optional, List, Literal
 
+# Try to import fused kernel (may fail on non-Linux or without Triton)
+try:
+    from .FusedLinearLayerNormLIF import FusedLinearLayerNormLIF
+    FUSED_AVAILABLE = True
+except ImportError:
+    FUSED_AVAILABLE = False
+
 
 class SSAMultiHeadAttention_(nn.Module):
     """
@@ -111,6 +118,9 @@ class SSAMultiHeadAttention(nn.Module):
     """
     Spiking Self-Attention with XNOR attention and Log Positional Encoding.
     Supports configurable mask mode (multiply or additive).
+    
+    Args:
+        use_fused: If True, use fused Linear-LayerNorm-LIF kernel for projections
     """
     
     def __init__(
@@ -123,35 +133,46 @@ class SSAMultiHeadAttention(nn.Module):
         dropout: float = 0.0,
         n_steps: int = 1,
         bias: bool = True,
-        mask_mode: Literal["multiply", "additive"] = "multiply"
+        mask_mode: Literal["multiply", "additive"] = "multiply",
+        use_fused: bool = False
     ):
         super().__init__()
 
         # Scale initialized to smaller value as per paper recommendation
         self.scale = nn.Parameter(torch.tensor(0.05), requires_grad=True)
         self.mask_mode = mask_mode
+        self.use_fused = use_fused and FUSED_AVAILABLE
         
         self.d_model = d_model
         self.n_heads = n_heads
         self.d_head = d_model // n_heads
+        self.n_steps = n_steps
         
-        self.q_proj = nn.Linear(d_model, d_model, bias=bias)
-        self.k_proj = nn.Linear(d_model, d_model, bias=bias)
-        self.v_proj = nn.Linear(d_model, d_model, bias=bias)
+        if self.use_fused:
+            # Fused projections: Linear + LayerNorm + LIF in one kernel
+            self.q_fused = FusedLinearLayerNormLIF(d_model, d_model, n_steps=n_steps, learn_beta=True)
+            self.k_fused = FusedLinearLayerNormLIF(d_model, d_model, n_steps=n_steps, learn_beta=True)
+            self.v_fused = FusedLinearLayerNormLIF(d_model, d_model, n_steps=n_steps, learn_beta=True)
+            self.o_fused = FusedLinearLayerNormLIF(d_model, d_model, n_steps=n_steps, learn_beta=True)
+        else:
+            # Separate layers (original implementation)
+            self.q_proj = nn.Linear(d_model, d_model, bias=bias)
+            self.k_proj = nn.Linear(d_model, d_model, bias=bias)
+            self.v_proj = nn.Linear(d_model, d_model, bias=bias)
+            self.out_proj = nn.Linear(d_model, d_model, bias=bias)
 
-        self.lnq = nn.LayerNorm(d_model)
-        self.lnk = nn.LayerNorm(d_model)
-        self.lnv = nn.LayerNorm(d_model)
-        self.lno = nn.LayerNorm(d_model)
+            self.lnq = nn.LayerNorm(d_model)
+            self.lnk = nn.LayerNorm(d_model)
+            self.lnv = nn.LayerNorm(d_model)
+            self.lno = nn.LayerNorm(d_model)
 
-        self.lifq = LIF(n_steps=n_steps)
-        self.lifk = LIF(n_steps=n_steps)
-        self.lifv = LIF(n_steps=n_steps)
+            self.lifq = LIF(n_steps=n_steps)
+            self.lifk = LIF(n_steps=n_steps)
+            self.lifv = LIF(n_steps=n_steps)
+            self.lifo = LIF(n_steps=n_steps)
+        
+        # LIF for attention (always separate, not fusable)
         self.lifs = LIF(n_steps=n_steps, v_th=0.5)
-        self.lifo = LIF(n_steps=n_steps)
-
-        
-        self.out_proj = nn.Linear(d_model, d_model, bias=bias)
 
     def xnor_attention(self, Q, K):
         """Version sans reshape pour éviter les problèmes de vue"""
@@ -226,17 +247,33 @@ class SSAMultiHeadAttention(nn.Module):
         B, N, D = query.shape
         B_k, N_k, D_k = key.shape
         
-        Q = self.q_proj(query)
-        Q = self.lnq(Q)
-        Q, _ = self.lifq(Q)
+        if self.use_fused:
+            # Fused: flatten -> fused projection -> reshape back
+            # Input: [B, N, D] -> [B*N, D] for fused kernel
+            Q_flat = query.view(B * N, D)
+            K_flat = key.view(B_k * N_k, D_k)
+            V_flat = value.view(B_k * N_k, D_k)
+            
+            Q, _ = self.q_fused(Q_flat)
+            K, _ = self.k_fused(K_flat)
+            V, _ = self.v_fused(V_flat)
+            
+            Q = Q.view(B, N, D)
+            K = K.view(B_k, N_k, D_k)
+            V = V.view(B_k, N_k, D_k)
+        else:
+            # Original: separate Linear -> LayerNorm -> LIF
+            Q = self.q_proj(query)
+            Q = self.lnq(Q)
+            Q, _ = self.lifq(Q)
 
-        K = self.k_proj(key)
-        K = self.lnk(K)
-        K, _ = self.lifk(K)
+            K = self.k_proj(key)
+            K = self.lnk(K)
+            K, _ = self.lifk(K)
 
-        V = self.v_proj(value)
-        V = self.lnv(V)
-        V, _ = self.lifv(V)
+            V = self.v_proj(value)
+            V = self.lnv(V)
+            V, _ = self.lifv(V)
 
         Q = Q.view(B, N, self.n_heads, self.d_head).transpose(1, 2)  # (B, H, N, Dh)
         K = K.view(B, N_k, self.n_heads, self.d_head).transpose(1, 2) # (B, H, N_k, Dh)
@@ -260,9 +297,15 @@ class SSAMultiHeadAttention(nn.Module):
         attn_output, _ = self.lifs(attn_output)
         attn_output = attn_output.transpose(1, 2).contiguous().view(B, N, D)
         
-        output = self.out_proj(attn_output)
-        output = self.lno(output)
-        output, _ = self.lifo(output)
+        if self.use_fused:
+            # Fused output projection
+            output_flat = attn_output.view(B * N, D)
+            output, _ = self.o_fused(output_flat)
+            output = output.view(B, N, D)
+        else:
+            output = self.out_proj(attn_output)
+            output = self.lno(output)
+            output, _ = self.lifo(output)
         
         return output
     
@@ -271,7 +314,8 @@ class SSAMultiHeadAttention(nn.Module):
             f'd_model={self.d_model}, '
             f'n_heads={self.n_heads}, '
             f'd_head={self.d_head}, '
-            f'mask_mode={self.mask_mode}'
+            f'mask_mode={self.mask_mode}, '
+            f'use_fused={self.use_fused}'
         )
 
 

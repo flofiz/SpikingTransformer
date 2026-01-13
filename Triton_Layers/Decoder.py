@@ -19,6 +19,7 @@ class DecoderLayer(nn.Module):
         mask_mode: "multiply" or "additive" for causal masking
         use_mssa: If True, use Multi-Scale Spiking Attention for self-attention
         mssa_scales: Scales for MSSA
+        use_fused: If True, use fused Linear-LayerNorm-LIF kernels
     """
     def __init__(
         self,
@@ -30,7 +31,8 @@ class DecoderLayer(nn.Module):
         n_steps: int = 10,
         mask_mode: Literal["multiply", "additive"] = "multiply",
         use_mssa: bool = False,
-        mssa_scales: list = [1, 2, 4]
+        mssa_scales: list = [1, 2, 4],
+        use_fused: bool = False
     ):
         super().__init__()
         
@@ -40,7 +42,8 @@ class DecoderLayer(nn.Module):
             dropout=dropout,
             alpha=alpha,
             n_steps=n_steps,
-            mask_mode=mask_mode
+            mask_mode=mask_mode,
+            use_fused=use_fused
         )
         
         # Cross-attention always uses standard SSA (not MSSA)
@@ -50,10 +53,11 @@ class DecoderLayer(nn.Module):
             dropout=dropout,
             alpha=alpha,
             n_steps=n_steps,
-            mask_mode=mask_mode
+            mask_mode=mask_mode,
+            use_fused=use_fused
         )
         
-        self.mlp = SpikingMLP(d_model=d_model, ff_dim=ff_dim, n_steps=n_steps)
+        self.mlp = SpikingMLP(d_model=d_model, ff_dim=ff_dim, n_steps=n_steps, use_fused=use_fused)
 
     def forward(self, x, enc_output, mask=None):
         # x: [T, B, N, D]
@@ -84,6 +88,7 @@ class Decoder(nn.Module):
         mask_mode: "multiply" or "additive" for causal masking
         use_mssa: If True, use Multi-Scale Spiking Attention (only in first 2 layers)
         mssa_scales: Scales for MSSA
+        use_fused: If True, use fused Linear-LayerNorm-LIF kernels
     """
     def __init__(
         self,
@@ -97,7 +102,8 @@ class Decoder(nn.Module):
         mask_mode: Literal["multiply", "additive"] = "multiply",
         use_mssa: bool = False,
         mssa_scales: list = [1, 2, 4],
-        gradient_checkpointing: bool = False
+        gradient_checkpointing: bool = False,
+        use_fused: bool = False
     ):
         super().__init__()
         
@@ -116,7 +122,8 @@ class Decoder(nn.Module):
                     n_steps=n_steps,
                     mask_mode=mask_mode,
                     use_mssa=layer_use_mssa,
-                    mssa_scales=mssa_scales
+                    mssa_scales=mssa_scales,
+                    use_fused=use_fused
                 )
             )
 
