@@ -263,28 +263,37 @@ def test_benchmark():
         # Warmup
         print(f"    Warming up ({n_warmup} iterations)...")
         for _ in range(n_warmup):
-            out_fused, _ = fused(x.clone())
+            # Fused warmup
+            fused.zero_grad()
+            x_warmup = torch.randn(T * B, D_in, device='cuda', requires_grad=True)
+            out_fused, _ = fused(x_warmup)
             out_fused.sum().backward()
-            out_ref, _ = ref(x.clone())
+            
+            # Reference warmup
+            ref.zero_grad()
+            x_warmup_ref = torch.randn(T * B, D_in, device='cuda', requires_grad=True)
+            out_ref, _ = ref(x_warmup_ref)
             out_ref.sum().backward()
         
         torch.cuda.synchronize()
         
         # Benchmark fused (forward + backward)
-        x_fused = torch.randn(T * B, D_in, device='cuda', requires_grad=True)
         torch.cuda.synchronize()
         start = time.perf_counter()
         for _ in range(n_iter):
+            fused.zero_grad()
+            x_fused = torch.randn(T * B, D_in, device='cuda', requires_grad=True)
             out, _ = fused(x_fused)
             out.sum().backward()
         torch.cuda.synchronize()
         fused_time = (time.perf_counter() - start) / n_iter * 1000  # ms
         
         # Benchmark reference (forward + backward)
-        x_ref = torch.randn(T * B, D_in, device='cuda', requires_grad=True)
         torch.cuda.synchronize()
         start = time.perf_counter()
         for _ in range(n_iter):
+            ref.zero_grad()
+            x_ref = torch.randn(T * B, D_in, device='cuda', requires_grad=True)
             out, _ = ref(x_ref)
             out.sum().backward()
         torch.cuda.synchronize()
