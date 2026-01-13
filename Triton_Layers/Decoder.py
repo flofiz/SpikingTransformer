@@ -34,24 +34,14 @@ class DecoderLayer(nn.Module):
     ):
         super().__init__()
         
-        if use_mssa:
-            self.self_attns = MultiScaleXNORAttention(
-                d_model=d_model,
-                n_heads=n_heads,
-                scales=mssa_scales,
-                n_steps=n_steps,
-                dropout=dropout,
-                mask_mode=mask_mode
-            )
-        else:
-            self.self_attns = SSAMultiHeadAttention(
-                d_model=d_model,
-                n_heads=n_heads,
-                dropout=dropout,
-                alpha=alpha,
-                n_steps=n_steps,
-                mask_mode=mask_mode
-            )
+        self.self_attns = SSAMultiHeadAttention(
+            d_model=d_model,
+            n_heads=n_heads,
+            dropout=dropout,
+            alpha=alpha,
+            n_steps=n_steps,
+            mask_mode=mask_mode
+        )
         
         # Cross-attention always uses standard SSA (not MSSA)
         self.cross_attns = SSAMultiHeadAttention(
