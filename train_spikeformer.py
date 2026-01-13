@@ -18,6 +18,7 @@ from torch.cuda.amp import autocast, GradScaler
 
 from transformers import TrOCRProcessor
 import torch.nn.functional as F
+from torchvision.transforms import functional as TF
 from Triton_Layers.Seq2Seq import Seq2Seq as Seq2SeqTransformer
 from wiki_text_images3 import WikiTextImageDataset, WikiTextDataCollator
 
