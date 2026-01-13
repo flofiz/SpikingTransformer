@@ -29,7 +29,7 @@ import math
         triton.Config({'BLOCK_SIZE_D': 1024}, num_warps=8, num_stages=2),
         triton.Config({'BLOCK_SIZE_D': 2048}, num_warps=16, num_stages=2),
     ],
-    key=['D_OUT'],
+    key=['D_IN', 'D_OUT'],  # Key on fixed dimensions only
 )
 @triton.jit
 def fused_linear_layernorm_forward_kernel(
@@ -168,7 +168,7 @@ def fused_linear_layernorm_forward_kernel(
         triton.Config({'BLOCK_SIZE_N': 512}, num_warps=16, num_stages=2),
         triton.Config({'BLOCK_SIZE_N': 1024}, num_warps=16, num_stages=3),
     ],
-    key=[],
+    key=['N_NEURONS'],  # Only key on fixed dimension (d_model/d_out)
 )
 @triton.jit
 def lif_forward_kernel_fused(
@@ -176,7 +176,7 @@ def lif_forward_kernel_fused(
     V_MEM_INIT_PTR,
     BETA_PTR, V_TH_PTR, V_RESET_PTR,
     T,
-    N_BATCH: tl.constexpr,
+    N_BATCH,  # Not constexpr - varies with batch size
     N_NEURONS,
     stride_in_t, stride_in_b, stride_in_n,
     stride_out_t, stride_out_b, stride_out_n,
@@ -239,7 +239,7 @@ def superspike_surrogate_grad(v_over_th, K: tl.constexpr):
         triton.Config({'BLOCK_SIZE_N': 512}, num_warps=16, num_stages=2),
         triton.Config({'BLOCK_SIZE_N': 1024}, num_warps=16, num_stages=3),
     ],
-    key=[],
+    key=['N_NEURONS'],  # Only key on fixed dimension
 )
 @triton.jit
 def lif_backward_kernel_fused(
@@ -249,7 +249,7 @@ def lif_backward_kernel_fused(
     V_MEM_HISTORY_PTR,
     BETA_PTR, V_TH_PTR, V_RESET_PTR,
     K_SUPERSPIKE: tl.constexpr,
-    T, N_BATCH: tl.constexpr, N_NEURONS,
+    T, N_BATCH, N_NEURONS,  # N_BATCH not constexpr
     stride_grad_out_t, stride_grad_out_b, stride_grad_out_n,
     stride_grad_in_t, stride_grad_in_b, stride_grad_in_n,
     stride_grad_v_b, stride_grad_v_n,
@@ -370,7 +370,7 @@ def lif_backward_kernel_fused(
         triton.Config({'BLOCK_SIZE_D': 1024}, num_warps=8, num_stages=2),
         triton.Config({'BLOCK_SIZE_D': 2048}, num_warps=16, num_stages=2),
     ],
-    key=['D_OUT'],
+    key=['D_IN', 'D_OUT'],  # Key on fixed dimensions only
 )
 @triton.jit
 def fused_linear_layernorm_backward_kernel(
