@@ -698,7 +698,7 @@ def train():
     # PRINT EXAMPLES FUNCTION
     # ============================================
     @torch.no_grad()
-    def print_examples(batch_src, batch_labels, logits_steps, max_examples=3):
+    def print_examples(batch_src, batch_labels, logits_steps, step, max_examples=3):
         logits = logits_steps.mean(dim=0)
         pred_tf_str = strings_from_logits_until_eos(processor, logits, EOS_IDX)
         gt_str = tokens_to_strings_until_eos(processor, batch_labels, EOS_IDX)
@@ -706,6 +706,11 @@ def train():
         print("\n" + "="*60)
         print("Exemples (Teacher Forcing vs Greedy Decoding):")
         print("="*60)
+        
+        # WandB Table
+        wandb_data = []
+        wandb_columns = ["Image", "Ground Truth", "Teacher Forcing", "Greedy Decode"]
+        
         nb = min(max_examples, batch_src.size(0))
         for i in range(nb):
             ys, _, _ = model.greedy_decode(
@@ -723,6 +728,29 @@ def train():
             print(f"  GT (Ground Truth): {gt_str[i]}")
             print(f"  TF (Teacher Force): {pred_tf_str[i]}")
             print(f"  GD (Greedy Decode): {gen_str}")
+            
+            # Prepare data for WandB
+            if is_main_process() and WANDB_AVAILABLE and wandb is not None:
+                # Convert image tensor to PIL
+                # batch_src is (B, C, H, W) -> (C, H, W)
+                img_tensor = batch_src[i].cpu()
+                if img_tensor.shape[0] == 1: # Grayscale -> (H, W) or (1,H,W)
+                   img_tensor = img_tensor.squeeze(0) 
+                   img_pil = TF.to_pil_image(img_tensor, mode='L')
+                else: # RGB
+                   img_pil = TF.to_pil_image(img_tensor, mode='RGB')
+                   
+                wandb_data.append([
+                    wandb.Image(img_pil),
+                    gt_str[i],
+                    pred_tf_str[i],
+                    gen_str
+                ])
+
+        if is_main_process() and WANDB_AVAILABLE and wandb is not None and wandb_data:
+             table = wandb.Table(columns=wandb_columns, data=wandb_data)
+             wandb.log({"training_examples": table}, step=step)
+
         print("="*60 + "\n", flush=True)
 
     # ============================================
@@ -938,7 +966,7 @@ def train():
             if global_step % LOG_PRINT_EVERY == 0:
                 model.eval()
                 with torch.no_grad():
-                    print_examples(src, labels, logits_steps, max_examples=3)
+                    print_examples(src, labels, logits_steps, step=global_step, max_examples=3)
                 model.train()
 
             if global_step % EVAL_EVERY == 0:
