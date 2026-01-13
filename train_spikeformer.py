@@ -711,9 +711,12 @@ def train():
         wandb_data = []
         wandb_columns = ["Image", "Ground Truth", "Teacher Forcing", "Greedy Decode"]
         
+        # Handle DDP wrapping for method access
+        inference_model = model.module if IS_DDP else model
+        
         nb = min(max_examples, batch_src.size(0))
         for i in range(nb):
-            ys, _, _ = model.greedy_decode(
+            ys, _, _ = inference_model.greedy_decode(
                 src=batch_src[i],
                 max_len=batch_labels.size(1),
                 start_symbol=START_IDX,
