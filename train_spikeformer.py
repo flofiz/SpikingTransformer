@@ -735,25 +735,36 @@ def train():
             
             # Prepare data for WandB
             if is_main_process() and WANDB_AVAILABLE and wandb is not None:
-                # Convert image tensor to PIL
-                # batch_src is (B, C, H, W) -> (C, H, W)
-                img_tensor = batch_src[i].cpu()
-                if img_tensor.shape[0] == 1: # Grayscale -> (H, W) or (1,H,W)
-                   img_tensor = img_tensor.squeeze(0) 
-                   img_pil = TF.to_pil_image(img_tensor, mode='L')
-                else: # RGB
-                   img_pil = TF.to_pil_image(img_tensor, mode='RGB')
-                   
-                wandb_data.append([
-                    wandb.Image(img_pil),
-                    gt_str[i],
-                    pred_tf_str[i],
-                    gen_str
-                ])
+                try:
+                    # Convert image tensor to PIL
+                    # batch_src is (B, C, H, W) -> (C, H, W)
+                    img_tensor = batch_src[i].cpu()
+                    if img_tensor.shape[0] == 1: # Grayscale -> (H, W) or (1,H,W)
+                       if img_tensor.ndim == 3:
+                            img_tensor = img_tensor.squeeze(0)
+                       img_pil = TF.to_pil_image(img_tensor, mode='L')
+                    else: # RGB
+                       img_pil = TF.to_pil_image(img_tensor, mode='RGB')
+                       
+                    wandb_data.append([
+                        wandb.Image(img_pil, caption=f"Ex {i}"),
+                        gt_str[i],
+                        pred_tf_str[i],
+                        gen_str
+                    ])
+                except Exception as e:
+                    print(f"[WandB Debug] Error preparing example {i}: {e}")
 
-        if is_main_process() and WANDB_AVAILABLE and wandb is not None and wandb_data:
-             table = wandb.Table(columns=wandb_columns, data=wandb_data)
-             wandb.log({"training_examples": table}, step=step)
+        if is_main_process() and WANDB_AVAILABLE and wandb is not None:
+             if wandb_data:
+                 print(f"[WandB Debug] Logging table with {len(wandb_data)} rows at step {step}")
+                 try:
+                     table = wandb.Table(columns=wandb_columns, data=wandb_data)
+                     wandb.log({"training_examples": table}, step=step)
+                 except Exception as e:
+                     print(f"[WandB Debug] Error logging table: {e}")
+             else:
+                 print("[WandB Debug] No data collected for table!")
 
         print("="*60 + "\n", flush=True)
 
@@ -968,10 +979,11 @@ def train():
                 })
             
             if global_step % LOG_PRINT_EVERY == 0:
-                model.eval()
-                with torch.no_grad():
-                    print_examples(src, labels, logits_steps, step=global_step, max_examples=3)
-                model.train()
+                if is_main_process():
+                    model.eval()
+                    with torch.no_grad():
+                        print_examples(src, labels, logits_steps, step=global_step, max_examples=3)
+                    model.train()
 
             if global_step % EVAL_EVERY == 0:
                 val_loss, val_acc, val_cer, val_ppl, cur_lr = evaluate()
@@ -1030,6 +1042,10 @@ def train():
                             wandb.run.summary["best_val_ppl"] = val_ppl
                 
                 model.train()
+                
+                # Re-sync processes after eval
+                if IS_DDP:
+                    torch.distributed.barrier()
 
         epoch_time = time.time() - t0
         if is_main_process():
