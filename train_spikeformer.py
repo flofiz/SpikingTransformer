@@ -504,7 +504,7 @@ def train():
 
     val_loader = DataLoader(
         val_ds, 
-        batch_size=BATCH_SIZE//4, 
+        batch_size=BATCH_SIZE//8, 
         num_workers=config["num_workers"], 
         prefetch_factor=2,
         persistent_workers=True,
@@ -1071,6 +1071,7 @@ def train():
                             wandb.run.summary["best_val_ppl"] = val_ppl
                 
                 model.train()
+                inference_model.frequency()  # Ensure back to training mode
                 
                 # Re-sync processes after eval
                 if IS_DDP:
