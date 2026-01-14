@@ -504,7 +504,7 @@ def train():
 
     val_loader = DataLoader(
         val_ds, 
-        batch_size=BATCH_SIZE, 
+        batch_size=BATCH_SIZE//4, 
         num_workers=config["num_workers"], 
         prefetch_factor=2,
         persistent_workers=True,

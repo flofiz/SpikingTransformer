@@ -2,6 +2,7 @@
 *.log
 *.logs
 checkpoints/
+checkpoints1/
 Triton_Layers/Lif_bcp.py
 notebook.ipynb
 wandb_key.txt

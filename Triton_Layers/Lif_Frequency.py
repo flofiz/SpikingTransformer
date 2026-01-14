@@ -112,30 +112,30 @@ class LIFFrequency(nn.Module):
         """
         Propagation avant en mode fréquentiel.
         
-        En mode fréquence, PAS de répétition temporelle.
-        L'entrée et la sortie ont la MÊME forme.
+        Approximation correcte du LIF:
+        - LIF ne fire que pour des entrées positives au-dessus du seuil
+        - Pour une entrée constante I sur T pas de temps:
+          n_spikes ≈ floor(T * ReLU(I) / v_th), borné par T
+          frequency = n_spikes / T ∈ {0, 1/T, 2/T, ..., 1}
         
         Args:
             x: Tenseur d'entrée de forme quelconque (B, ...)
             
         Returns:
             output: Fréquences quantifiées (même forme que x)
-            v_mem_final: Placeholder pour compatibilité API (None ou zéros)
+            v_mem_final: None (pas de concept de membrane en mode fréquence)
         """
         # Normaliser par le seuil
         x_normalized = x / self.v_th
         
-        # Appliquer sigmoid pour mapper dans [0, 1]
-        # Cela simule l'accumulation d'un neurone LIF:
-        # - entrée faible -> peu de spikes -> fréquence basse
-        # - entrée forte -> beaucoup de spikes -> fréquence haute
-        x_sigmoid = torch.sigmoid(x_normalized)
+        # ReLU: LIF ne fire que pour entrées positives
+        # Clamp à [0, 1]: la fréquence max est 1 (fire à chaque pas)
+        x_clamped = torch.clamp(torch.relu(x_normalized), 0.0, 1.0)
         
-        # Quantifier avec STE
-        output = STEQuantize.apply(x_sigmoid, self.n_steps)
+        # Quantifier avec STE à n_steps niveaux
+        output = STEQuantize.apply(x_clamped, self.n_steps)
         
-        # v_mem_final placeholder (pour compatibilité API avec LIF)
-        # Retourne None car pas de concept de membrane en mode fréquence
+        # Pas de membrane en mode fréquence
         v_mem_final = None
         
         return output, v_mem_final
