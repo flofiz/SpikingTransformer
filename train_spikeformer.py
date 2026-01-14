@@ -632,6 +632,9 @@ def train():
     # ============================================
     @torch.no_grad()
     def evaluate() -> Tuple[float, float, float, float, float]:
+        # Use SPIKE mode for evaluation (binary inference)
+        inference_model = model.module if IS_DDP else model
+        inference_model.spike()
         model.eval()
         eval_loss = 0.0
         eval_acc = 0.0
@@ -769,11 +772,12 @@ def train():
         print("="*60 + "\n", flush=True)
 
     # ============================================
-    # SANITY CHECK (Rank 0 only)
+    # SANITY CHECK (Rank 0 only) - Both modes
     # ============================================
     if is_main_process():
         print("="*60)
         print("Sanity Check: Test de génération avant entraînement...")
+        print("  (Test des modes Spike et Frequency)")
         print("="*60)
         try:
             model_eval = model.module if IS_DDP else model
@@ -783,7 +787,11 @@ def train():
                 first_batch = next(iter(train_loader))
                 src0 = first_batch["pixel_values"].to(config["device"], non_blocking=True)[0]
                 labels0 = first_batch["labels"].to(config["device"], non_blocking=True)[0]
-                _ys, _attn, _out = model_eval.greedy_decode(
+                gt_str = processor.decode(trim_to_eos(labels0, EOS_IDX).tolist(), skip_special_tokens=True)
+                
+                # Test mode SPIKE (inference standard)
+                model_eval.spike()
+                _ys_spike, _, _ = model_eval.greedy_decode(
                     src=src0,
                     max_len=labels0.size(0),
                     start_symbol=START_IDX,
@@ -791,11 +799,25 @@ def train():
                     pad_idx=PAD_IDX,
                     device=config["device"],
                 )
-                gen_str = processor.decode(trim_to_eos(_ys[0], EOS_IDX).tolist(), skip_special_tokens=True)
-                gt_str = processor.decode(trim_to_eos(labels0, EOS_IDX).tolist(), skip_special_tokens=True)
+                gen_str_spike = processor.decode(trim_to_eos(_ys_spike[0], EOS_IDX).tolist(), skip_special_tokens=True)
+                
+                # Test mode FREQUENCY (mode entraînement)
+                model_eval.frequency()
+                _ys_freq, _, _ = model_eval.greedy_decode(
+                    src=src0,
+                    max_len=labels0.size(0),
+                    start_symbol=START_IDX,
+                    eos_idx=EOS_IDX,
+                    pad_idx=PAD_IDX,
+                    device=config["device"],
+                )
+                gen_str_freq = processor.decode(trim_to_eos(_ys_freq[0], EOS_IDX).tolist(), skip_special_tokens=True)
+                
                 print(f"✅ Sanity check PASSED")
-                print(f"   Ground Truth: {gt_str}")
-                print(f"   Generated (random init): {gen_str}", flush=True)
+                print(f"   Ground Truth:           {gt_str}")
+                print(f"   Generated [SPIKE mode]: {gen_str_spike}")
+                print(f"   Generated [FREQ mode]:  {gen_str_freq}", flush=True)
+                
             model.train() # Reset to train mode
         except Exception as e:
             print(f"❌ Sanity check FAILED: {e}")
@@ -816,6 +838,8 @@ def train():
         print("="*60)
         print("Début de l'entraînement")
         print("="*60)
+        print(f"🔄 Training mode: FREQUENCY (continuous gradients)")
+        print(f"📊 Evaluation mode: SPIKE (binary inference)")
         print(f"Total steps: {total_steps}")
         print(f"Batch size: {BATCH_SIZE} (per GPU)")
         print(f"Learning rate: {LR} (warmup 10%, cosine decay)")
@@ -890,6 +914,11 @@ def train():
 
     for epoch in range(start_epoch, NUM_EPOCHS + 1):
         model.train()
+        
+        # Use FREQUENCY mode for training (continuous gradients)
+        inference_model = model.module if IS_DDP else model
+        inference_model.frequency()
+        
         running_loss = 0.0
         running_acc = 0.0
         t0 = time.time()

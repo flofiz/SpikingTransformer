@@ -1,7 +1,6 @@
 import torch
-import triton
-import triton.language as tl
-from .Lif import LIF
+from .lif_auto import LIF  # Auto-selects Triton or PyTorch fallback
+from .Lif_Frequency import LIFFrequency
 import torch.nn as nn
 import torch.nn.functional as F
 import math
@@ -130,6 +129,10 @@ class SSAMultiHeadAttention(nn.Module):
         # Scale initialized to smaller value as per paper recommendation
         self.scale = nn.Parameter(torch.tensor(0.05), requires_grad=True)
         self.mask_mode = mask_mode
+        self.n_steps = n_steps
+        
+        # Mode: False = spike (default), True = frequency
+        self.frequency_mode = False
         
         self.d_model = d_model
         self.n_heads = n_heads
@@ -144,17 +147,25 @@ class SSAMultiHeadAttention(nn.Module):
         self.lnv = nn.LayerNorm(d_model)
         self.lno = nn.LayerNorm(d_model)
 
+        # Spike-mode LIF layers
         self.lifq = LIF(n_steps=n_steps)
         self.lifk = LIF(n_steps=n_steps)
         self.lifv = LIF(n_steps=n_steps)
         self.lifs = LIF(n_steps=n_steps, v_th=0.5)
         self.lifo = LIF(n_steps=n_steps)
+        
+        # Frequency-mode LIF layers
+        self.lifq_freq = LIFFrequency(n_steps=n_steps)
+        self.lifk_freq = LIFFrequency(n_steps=n_steps)
+        self.lifv_freq = LIFFrequency(n_steps=n_steps)
+        self.lifs_freq = LIFFrequency(n_steps=n_steps, v_th=0.5)
+        self.lifo_freq = LIFFrequency(n_steps=n_steps)
 
         
         self.out_proj = nn.Linear(d_model, d_model, bias=bias)
 
     def xnor_attention(self, Q, K):
-        """Version sans reshape pour éviter les problèmes de vue"""
+        """XNOR attention pour spikes binaires (mode spike)"""
         B, H, L, Dh = Q.shape
         
         # Travailler directement en 4D
@@ -172,6 +183,43 @@ class SSAMultiHeadAttention(nn.Module):
         
         # XNOR count
         attn_map = Dh - hamming_dist
+        
+        return attn_map
+    
+    def xnor_attention_frequency(self, Q, K):
+        """
+        Équivalent probabiliste de l'attention XNOR pour l'entraînement fréquentiel.
+        
+        Formule: P(XNOR=1) = 2*q*k - q - k + 1
+        
+        Cette formule donne la probabilité que deux bits q et k (représentés
+        comme probabilités de spike) soient identiques (XNOR = 1).
+        
+        Avantages vs XNOR binaire:
+        - Gradients informatifs même quand k=0 (contrairement au produit scalaire)
+        - Surface d'optimisation lisse
+        - Équivalent exact de XNOR aux coins {0,1}
+        
+        Args:
+            Q: Tensor (B, H, L, D) avec valeurs dans [0, 1]
+            K: Tensor (B, H, M, D) avec valeurs dans [0, 1]
+            
+        Returns:
+            attn_map: Tensor (B, H, L, M) représentant la similarité XNOR
+        """
+        B, H, L, Dh = Q.shape
+        _, _, M, _ = K.shape
+        
+        # Produit Q*K: term 2qk
+        qk_prod = torch.einsum('bhld,bhmd->bhlm', Q, K)  # (B, H, L, M)
+        
+        # Sommes pour les termes -q et -k
+        q_sum = Q.sum(dim=-1, keepdim=True)  # (B, H, L, 1)
+        k_sum = K.sum(dim=-1, keepdim=True)  # (B, H, M, 1)
+        
+        # Formule XNOR probabiliste: 2qk - q - k + 1 (sommée sur D dimension)
+        # = 2 * sum(qi*ki) - sum(qi) - sum(ki) + D
+        attn_map = 2 * qk_prod - q_sum - k_sum.transpose(2, 3) + Dh
         
         return attn_map
     
@@ -226,43 +274,77 @@ class SSAMultiHeadAttention(nn.Module):
         B, N, D = query.shape
         B_k, N_k, D_k = key.shape
         
-        Q = self.q_proj(query)
-        Q = self.lnq(Q)
-        Q, _ = self.lifq(Q)
+        if self.frequency_mode:
+            # === Mode fréquentiel pour l'entraînement ===
+            Q = self.q_proj(query)
+            Q = self.lnq(Q)
+            Q, _ = self.lifq_freq(Q)
 
-        K = self.k_proj(key)
-        K = self.lnk(K)
-        K, _ = self.lifk(K)
+            K = self.k_proj(key)
+            K = self.lnk(K)
+            K, _ = self.lifk_freq(K)
 
-        V = self.v_proj(value)
-        V = self.lnv(V)
-        V, _ = self.lifv(V)
+            V = self.v_proj(value)
+            V = self.lnv(V)
+            V, _ = self.lifv_freq(V)
 
-        Q = Q.view(B, N, self.n_heads, self.d_head).transpose(1, 2)  # (B, H, N, Dh)
-        K = K.view(B, N_k, self.n_heads, self.d_head).transpose(1, 2) # (B, H, N_k, Dh)
-        V = V.view(B, N_k, self.n_heads, self.d_head).transpose(1, 2) # (B, H, N_k, Dh)
+            Q = Q.view(B, N, self.n_heads, self.d_head).transpose(1, 2)
+            K = K.view(B, N_k, self.n_heads, self.d_head).transpose(1, 2)
+            V = V.view(B, N_k, self.n_heads, self.d_head).transpose(1, 2)
 
-        attn_output = self.xnor_attention(Q, K)
-        log_bias = self.get_log_pe_bias_cross(N, N_k, Q.device)  # (L, L)
+            # XNOR probabiliste
+            attn_output = self.xnor_attention_frequency(Q, K)
+        else:
+            # === Mode spike pour l'inférence (comportement existant) ===
+            Q = self.q_proj(query)
+            Q = self.lnq(Q)
+            Q, _ = self.lifq(Q)
+
+            K = self.k_proj(key)
+            K = self.lnk(K)
+            K, _ = self.lifk(K)
+
+            V = self.v_proj(value)
+            V = self.lnv(V)
+            V, _ = self.lifv(V)
+
+            Q = Q.view(B, N, self.n_heads, self.d_head).transpose(1, 2)
+            K = K.view(B, N_k, self.n_heads, self.d_head).transpose(1, 2)
+            V = V.view(B, N_k, self.n_heads, self.d_head).transpose(1, 2)
+
+            # XNOR binaire
+            attn_output = self.xnor_attention(Q, K)
         
-        # Broadcast sur batch et heads: (L, L) -> (1, 1, L, L)
+        # Log-PE (commun aux deux modes)
+        log_bias = self.get_log_pe_bias_cross(N, N_k, Q.device)
         log_bias = log_bias.unsqueeze(0).unsqueeze(0)
-        attn_output = attn_output + log_bias  # (B, n_heads, L, L)
+        attn_output = attn_output + log_bias
         
+        # Masque d'attention
         if attention_mask is not None:
             if self.mask_mode == "multiply":
                 attn_output = attn_output * attention_mask
             elif self.mask_mode == "additive":
                 attn_output = attn_output.masked_fill(attention_mask == 0, float('-inf'))
         
+        # Agrégation avec V
         attn_output = (attn_output * self.scale) @ V
 
-        attn_output, _ = self.lifs(attn_output)
+        # LIF de sortie (adapté au mode)
+        if self.frequency_mode:
+            attn_output, _ = self.lifs_freq(attn_output)
+        else:
+            attn_output, _ = self.lifs(attn_output)
+            
         attn_output = attn_output.transpose(1, 2).contiguous().view(B, N, D)
         
         output = self.out_proj(attn_output)
         output = self.lno(output)
-        output, _ = self.lifo(output)
+        
+        if self.frequency_mode:
+            output, _ = self.lifo_freq(output)
+        else:
+            output, _ = self.lifo(output)
         
         return output
     

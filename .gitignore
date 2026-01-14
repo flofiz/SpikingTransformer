@@ -6,6 +6,7 @@ Triton_Layers/Lif_bcp.py
 notebook.ipynb
 wandb_key.txt
 wandb/
+Rapport/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

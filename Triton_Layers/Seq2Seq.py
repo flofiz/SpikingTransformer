@@ -3,7 +3,7 @@ import torch
 from .Encoder import Encoder
 from .Decoder import Decoder
 from .ImageEncoder import CNNBackbone
-from .Lif import LIF
+from .lif_auto import LIF  # Auto-selects Triton or PyTorch fallback
 import math
 from typing import Literal, List, Optional
 
@@ -122,6 +122,45 @@ class Seq2Seq(nn.Module):
         self.lifPE = LIF(n_steps=n_steps)
         self.tgt_tok_emb = TokenEmbedding(tgt_vocab_size, d_model)
         self.positional_encoding = PositionalEncoding(d_model, dropout=dropout)
+        
+        # Mode: False = spike (default), True = frequency
+        self._frequency_mode = False
+    
+    # =========================================================================
+    # Mode switching methods for frequency-equivalent training
+    # =========================================================================
+    
+    def use_frequency_mode(self, enable: bool = True):
+        """
+        Bascule entre mode fréquence (entraînement) et mode spike (évaluation).
+        
+        Args:
+            enable: True pour mode fréquence, False pour mode spike
+        """
+        self._frequency_mode = enable
+        self._set_mode_recursive(self, enable)
+    
+    def _set_mode_recursive(self, module, enable: bool):
+        """Applique le mode à tous les sous-modules SSA."""
+        for child in module.children():
+            if hasattr(child, 'frequency_mode'):
+                child.frequency_mode = enable
+            self._set_mode_recursive(child, enable)
+    
+    @property
+    def frequency_mode(self):
+        """Retourne le mode actuel."""
+        return self._frequency_mode
+    
+    def spike(self):
+        """Configure le modèle pour l'inférence spike (binaire)."""
+        self.use_frequency_mode(False)
+        return self
+        
+    def frequency(self):
+        """Configure le modèle pour l'entraînement fréquentiel."""
+        self.use_frequency_mode(True)
+        return self
 
     def forward(self, src, tgt, look_ahead_mask: Tensor = None, enc_padding_mask: Tensor = None, dec_padding_mask: Tensor = None):
         # src: [B, C, H, W]

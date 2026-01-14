@@ -2,7 +2,7 @@ import math
 import torch
 from torch import nn
 from einops import rearrange
-from .Lif import LIF
+from .lif_auto import LIF  # Auto-selects Triton or PyTorch fallback
 
 
 class FusedInvertedBottleneck(nn.Module):
