@@ -361,36 +361,26 @@ class LIF(nn.Module):
     
     def _compute_frequency_output(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Calcule la sortie en mode fréquence en utilisant les paramètres actuels du LIF spike.
+        Calcule la sortie en mode fréquence.
         
-        Formule: frequency = quantize(ReLU(x * gain / T / v_th), T niveaux)
-        où gain = (1 - beta^T) / (1 - beta) pour tenir compte du leak
+        Pour une entrée constante avec reset après chaque spike:
+        - Le gain (1-beta^T)/(1-beta) suppose PAS de reset (incorrect)
+        - Avec reset, la fréquence de décharge est simplement I/v_th
+        - Car après chaque spike, on reset et recommence l'accumulation
+        
+        Formule simplifiée: frequency = quantize(ReLU(x / v_th), T niveaux)
         """
-        # Get current beta from spike LIF (may be learned)
-        beta = self._lif_spike.beta
-        if isinstance(beta, torch.Tensor):
-            beta_val = beta.item()
-        else:
-            beta_val = float(beta)
-        
-        # Get current v_th
+        # Get current v_th from spike LIF (may be learned)
         v_th = self._lif_spike.v_th
         if not isinstance(v_th, torch.Tensor):
             v_th = torch.tensor(v_th, device=x.device, dtype=x.dtype)
         
-        # Compute effective gain: (1 - beta^T) / (1 - beta)
-        if abs(beta_val - 1.0) < 1e-6:
-            gain = float(self.n_steps)
-        else:
-            gain = (1.0 - beta_val ** self.n_steps) / (1.0 - beta_val)
+        # Normaliser par le seuil - formule directe sans gain
+        # Avec reset après chaque spike, freq ≈ I / v_th
+        x_normalized = x / v_th
         
-        # Entrée effective = input * gain / T
-        x_effective = x * gain / self.n_steps
-        
-        # Normaliser par le seuil
-        x_normalized = x_effective / v_th
-        
-        # ReLU + Clamp à [0, 1]
+        # ReLU: LIF ne fire que pour entrées positives
+        # Clamp à [0, 1]: fréquence max = 1 (fire chaque pas)
         x_clamped = torch.clamp(torch.relu(x_normalized), 0.0, 1.0)
         
         # Quantifier avec STE
@@ -415,11 +405,14 @@ class LIF(nn.Module):
     
     @property
     def beta(self):
-        return self._lif_spike.beta
+        """Get current beta value (handles both learned and fixed cases)."""
+        # Use get_beta() which handles learn_beta properly
+        return self._lif_spike.get_beta()
     
     @property
     def v_th(self):
-        return self._lif_spike.v_th
+        """Get current v_th value."""
+        return self._lif_spike.v_th.item() if hasattr(self._lif_spike.v_th, 'item') else self._lif_spike.v_th
     
     def extra_repr(self) -> str:
         mode = "frequency" if self.frequency_mode else "spike"
