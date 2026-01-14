@@ -163,33 +163,92 @@ class Seq2Seq(nn.Module):
         return self
 
     def forward(self, src, tgt, look_ahead_mask: Tensor = None, enc_padding_mask: Tensor = None, dec_padding_mask: Tensor = None):
+        """
+        Forward pass.
+        
+        En mode SPIKE: 
+            - Input est répété T fois -> [T*B, ...]
+            - Output: [T, B, N, vocab_size]
+            
+        En mode FREQUENCY:
+            - Input n'est PAS répété -> [B, ...]
+            - Output: [1, B, N, vocab_size] (dimension T artificielle pour compatibilité)
+        """
         # src: [B, C, H, W]
-        # tgt: [B, N, D]
-        enc_output, _ = self.encode(src)  # [T*B, N, D]
-        output = self.decode(tgt, enc_output, look_ahead_mask, enc_padding_mask, dec_padding_mask)  # [T*B, N, D] -> [T, B, N, D]
+        # tgt: [B, N]
+        enc_output, _ = self.encode(src)
+        output = self.decode(tgt, enc_output, look_ahead_mask, enc_padding_mask, dec_padding_mask)
         return output
 
     def encode(self, src: Tensor):
+        """
+        Encode source image.
+        
+        Mode SPIKE: répète T fois pour simulation temporelle
+        Mode FREQUENCY: pas de répétition temporelle
+        """
         B, C, H, W = src.shape
-        T = self.n_steps
-        src = src.unsqueeze(0).expand(T, B, C, H, W).reshape(T * B, C, H, W)  # [T*B, C, H, W]
-        enc_output, _ = self.image_encoder(src)  # [T*B, N, D]
-        enc_output = self.encoder(enc_output)  # [T*B, N, D]
+        
+        if self._frequency_mode:
+            # Mode FREQUENCY: pas de répétition temporelle
+            enc_output, _ = self.image_encoder(src)  # [B, N, D]
+            enc_output = self.encoder(enc_output)  # [B, N, D]
+        else:
+            # Mode SPIKE: répète T fois pour simulation temporelle
+            T = self.n_steps
+            src = src.unsqueeze(0).expand(T, B, C, H, W).reshape(T * B, C, H, W)  # [T*B, C, H, W]
+            enc_output, _ = self.image_encoder(src)  # [T*B, N, D]
+            enc_output = self.encoder(enc_output)  # [T*B, N, D]
+            
         return enc_output, None
 
     def decode(self, tgt: Tensor, enc_output: Tensor, look_ahead_mask: Tensor = None, enc_padding_mask: Tensor = None, dec_padding_mask: Tensor = None):
-        if look_ahead_mask is not None:
-            look_ahead_mask = look_ahead_mask.unsqueeze(0).repeat(self.n_steps, 1, 1, 1, 1).reshape(self.n_steps*look_ahead_mask.shape[0], look_ahead_mask.shape[1], look_ahead_mask.shape[2], look_ahead_mask.shape[3])  # [T*B, 1, N, N]
+        """
+        Decode target with encoder output.
+        
+        Mode SPIKE: répète T fois, output [T, B, N, V]
+        Mode FREQUENCY: pas de répétition, output [1, B, N, V]
+        """
         tgt = self.positional_encoding(self.tgt_tok_emb(tgt))
         B, N, D = tgt.shape
-        T = self.n_steps
-        tgt = tgt.unsqueeze(0).expand(T, B, N, D).reshape(T*B, N, D)  # [T*B, N, D]
-        tgt, _ = self.lifPE(tgt)  # Apply LIF to positional encoded target
         
-        dec_output = self.decoder(tgt, enc_output, mask=look_ahead_mask)  # [T*B, N, D]
-        output = self.output_layer(dec_output)  # [T*B, N, vocab_size]
-        output = output.view(self.n_steps, output.shape[0] // self.n_steps, output.shape[1], output.shape[2])
-        return output, None  # [T, B, N, vocab_size]
+        if self._frequency_mode:
+            # Mode FREQUENCY: pas de répétition temporelle
+            if look_ahead_mask is not None:
+                # Mask stays [B, 1, N, N]
+                pass
+                
+            # Pas d'application de LIF temporel sur le positional encoding
+            # On applique directement le LIF fréquentiel
+            tgt, _ = self.lifPE(tgt)  # LIF freq retourne même forme
+            
+            dec_output = self.decoder(tgt, enc_output, mask=look_ahead_mask)  # [B, N, D]
+            output = self.output_layer(dec_output)  # [B, N, vocab_size]
+            
+            # Ajoute dimension T=1 pour compatibilité avec le reste du pipeline
+            output = output.unsqueeze(0)  # [1, B, N, vocab_size]
+            
+        else:
+            # Mode SPIKE: répète T fois pour simulation temporelle
+            T = self.n_steps
+            
+            if look_ahead_mask is not None:
+                look_ahead_mask = look_ahead_mask.unsqueeze(0).repeat(T, 1, 1, 1, 1).reshape(
+                    T * look_ahead_mask.shape[0], 
+                    look_ahead_mask.shape[1], 
+                    look_ahead_mask.shape[2], 
+                    look_ahead_mask.shape[3]
+                )  # [T*B, 1, N, N]
+                
+            tgt = tgt.unsqueeze(0).expand(T, B, N, D).reshape(T*B, N, D)  # [T*B, N, D]
+            tgt, _ = self.lifPE(tgt)  # Apply LIF to positional encoded target
+            
+            dec_output = self.decoder(tgt, enc_output, mask=look_ahead_mask)  # [T*B, N, D]
+            output = self.output_layer(dec_output)  # [T*B, N, vocab_size]
+            output = output.view(T, output.shape[0] // T, output.shape[1], output.shape[2])
+            # output: [T, B, N, vocab_size]
+        
+        return output, None
     
     def create_padding_mask(self, seq: Tensor, pad_idx: int, device) -> Tensor:
         # 1 pour garder, 0 pour pad

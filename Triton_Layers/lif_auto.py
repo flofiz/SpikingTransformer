@@ -298,14 +298,14 @@ def get_lif_class():
             _TRITON_WARNING_SHOWN = True
         return LIFPyTorch
 
-
 # Create unified LIF class that auto-selects backend
 class LIF(nn.Module):
     """
     Unified LIF (Leaky Integrate-and-Fire) neuron module.
     
-    Automatically selects between Triton-accelerated and pure PyTorch
-    implementations based on availability.
+    Supports two modes:
+    - SPIKE mode (frequency_mode=False): Temporal simulation over n_steps
+    - FREQUENCY mode (frequency_mode=True): Quantized activation, no temporal expansion
     
     Args:
         beta: Leak factor (0 < beta <= 1)
@@ -331,11 +331,14 @@ class LIF(nn.Module):
     ):
         super().__init__()
         
-        # Get appropriate LIF class
+        self.n_steps = n_steps
+        self.v_th = v_th
+        
+        # Get appropriate spike-based LIF class
         LIFClass = get_lif_class()
         
-        # Create inner LIF module
-        self._lif = LIFClass(
+        # Create inner temporal LIF module (spike mode)
+        self._lif_spike = LIFClass(
             beta=beta,
             v_th=v_th,
             v_reset=v_reset,
@@ -346,16 +349,36 @@ class LIF(nn.Module):
             learn_v_reset=learn_v_reset
         )
         
+        # Create frequency LIF module
+        from .Lif_Frequency import LIFFrequency
+        self._lif_freq = LIFFrequency(
+            n_steps=n_steps,
+            v_th=v_th,
+            beta=beta,
+            learn_v_th=learn_v_th
+        )
+        
         self.backend = "triton" if TRITON_AVAILABLE else "pytorch"
+        
+        # Mode: False = spike (default), True = frequency
+        self.frequency_mode = False
     
     def forward(self, input_current: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        return self._lif(input_current)
+        if self.frequency_mode:
+            # Mode FREQUENCY: pas de répétition temporelle
+            # Input: [B, ...] -> Output: [B, ...]
+            return self._lif_freq(input_current)
+        else:
+            # Mode SPIKE: simulation temporelle
+            # Input attend [T*B, ...] (pré-répété) -> Output: [T*B, ...]
+            return self._lif_spike(input_current)
     
     def get_beta(self) -> float:
-        return self._lif.get_beta()
+        return self._lif_spike.get_beta()
     
     def extra_repr(self) -> str:
-        return f'backend={self.backend}'
+        mode = "frequency" if self.frequency_mode else "spike"
+        return f'backend={self.backend}, mode={mode}'
 
 
 # Export check function

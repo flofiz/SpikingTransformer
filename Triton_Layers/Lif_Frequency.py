@@ -112,12 +112,15 @@ class LIFFrequency(nn.Module):
         """
         Propagation avant en mode fréquentiel.
         
+        En mode fréquence, PAS de répétition temporelle.
+        L'entrée et la sortie ont la MÊME forme.
+        
         Args:
-            x: Tenseur d'entrée de forme quelconque
+            x: Tenseur d'entrée de forme quelconque (B, ...)
             
         Returns:
             output: Fréquences quantifiées (même forme que x)
-            v_mem_final: Placeholder pour compatibilité API (zéros)
+            v_mem_final: Placeholder pour compatibilité API (None ou zéros)
         """
         # Normaliser par le seuil
         x_normalized = x / self.v_th
@@ -132,10 +135,8 @@ class LIFFrequency(nn.Module):
         output = STEQuantize.apply(x_sigmoid, self.n_steps)
         
         # v_mem_final placeholder (pour compatibilité API avec LIF)
-        # On retourne zéros de la forme appropriée
-        v_mem_shape = list(x.shape)
-        v_mem_shape[0] = v_mem_shape[0] // self.n_steps
-        v_mem_final = torch.zeros(v_mem_shape, device=x.device, dtype=x.dtype)
+        # Retourne None car pas de concept de membrane en mode fréquence
+        v_mem_final = None
         
         return output, v_mem_final
     
@@ -216,7 +217,7 @@ def test_lif_frequency_equivalence():
     # Vérifications
     print(f"Input shape: {x.shape}")
     print(f"Output shape: {output.shape}")
-    print(f"v_mem shape: {v_mem.shape}")
+    print(f"v_mem: {v_mem} (None expected in frequency mode)")
     
     # 1. La sortie doit être quantifiée
     unique_vals = torch.unique(output)

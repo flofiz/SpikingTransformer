@@ -1,6 +1,5 @@
 import torch
-from .lif_auto import LIF  # Auto-selects Triton or PyTorch fallback
-from .Lif_Frequency import LIFFrequency
+from .lif_auto import LIF  # Auto-selects Triton or PyTorch fallback, supports frequency_mode
 import torch.nn as nn
 import torch.nn.functional as F
 import math
@@ -147,20 +146,12 @@ class SSAMultiHeadAttention(nn.Module):
         self.lnv = nn.LayerNorm(d_model)
         self.lno = nn.LayerNorm(d_model)
 
-        # Spike-mode LIF layers
+        # LIF layers - mode switching handled automatically via frequency_mode attribute
         self.lifq = LIF(n_steps=n_steps)
         self.lifk = LIF(n_steps=n_steps)
         self.lifv = LIF(n_steps=n_steps)
         self.lifs = LIF(n_steps=n_steps, v_th=0.5)
         self.lifo = LIF(n_steps=n_steps)
-        
-        # Frequency-mode LIF layers
-        self.lifq_freq = LIFFrequency(n_steps=n_steps)
-        self.lifk_freq = LIFFrequency(n_steps=n_steps)
-        self.lifv_freq = LIFFrequency(n_steps=n_steps)
-        self.lifs_freq = LIFFrequency(n_steps=n_steps, v_th=0.5)
-        self.lifo_freq = LIFFrequency(n_steps=n_steps)
-
         
         self.out_proj = nn.Linear(d_model, d_model, bias=bias)
 
@@ -274,45 +265,27 @@ class SSAMultiHeadAttention(nn.Module):
         B, N, D = query.shape
         B_k, N_k, D_k = key.shape
         
+        # Projections + LIF (mode géré automatiquement par LIF.frequency_mode)
+        Q = self.q_proj(query)
+        Q = self.lnq(Q)
+        Q, _ = self.lifq(Q)
+
+        K = self.k_proj(key)
+        K = self.lnk(K)
+        K, _ = self.lifk(K)
+
+        V = self.v_proj(value)
+        V = self.lnv(V)
+        V, _ = self.lifv(V)
+
+        Q = Q.view(B, N, self.n_heads, self.d_head).transpose(1, 2)
+        K = K.view(B, N_k, self.n_heads, self.d_head).transpose(1, 2)
+        V = V.view(B, N_k, self.n_heads, self.d_head).transpose(1, 2)
+
+        # XNOR attention (probabiliste si frequency_mode, binaire sinon)
         if self.frequency_mode:
-            # === Mode fréquentiel pour l'entraînement ===
-            Q = self.q_proj(query)
-            Q = self.lnq(Q)
-            Q, _ = self.lifq_freq(Q)
-
-            K = self.k_proj(key)
-            K = self.lnk(K)
-            K, _ = self.lifk_freq(K)
-
-            V = self.v_proj(value)
-            V = self.lnv(V)
-            V, _ = self.lifv_freq(V)
-
-            Q = Q.view(B, N, self.n_heads, self.d_head).transpose(1, 2)
-            K = K.view(B, N_k, self.n_heads, self.d_head).transpose(1, 2)
-            V = V.view(B, N_k, self.n_heads, self.d_head).transpose(1, 2)
-
-            # XNOR probabiliste
             attn_output = self.xnor_attention_frequency(Q, K)
         else:
-            # === Mode spike pour l'inférence (comportement existant) ===
-            Q = self.q_proj(query)
-            Q = self.lnq(Q)
-            Q, _ = self.lifq(Q)
-
-            K = self.k_proj(key)
-            K = self.lnk(K)
-            K, _ = self.lifk(K)
-
-            V = self.v_proj(value)
-            V = self.lnv(V)
-            V, _ = self.lifv(V)
-
-            Q = Q.view(B, N, self.n_heads, self.d_head).transpose(1, 2)
-            K = K.view(B, N_k, self.n_heads, self.d_head).transpose(1, 2)
-            V = V.view(B, N_k, self.n_heads, self.d_head).transpose(1, 2)
-
-            # XNOR binaire
             attn_output = self.xnor_attention(Q, K)
         
         # Log-PE (commun aux deux modes)
@@ -330,21 +303,14 @@ class SSAMultiHeadAttention(nn.Module):
         # Agrégation avec V
         attn_output = (attn_output * self.scale) @ V
 
-        # LIF de sortie (adapté au mode)
-        if self.frequency_mode:
-            attn_output, _ = self.lifs_freq(attn_output)
-        else:
-            attn_output, _ = self.lifs(attn_output)
+        # LIF de sortie (mode géré automatiquement)
+        attn_output, _ = self.lifs(attn_output)
             
         attn_output = attn_output.transpose(1, 2).contiguous().view(B, N, D)
         
         output = self.out_proj(attn_output)
         output = self.lno(output)
-        
-        if self.frequency_mode:
-            output, _ = self.lifo_freq(output)
-        else:
-            output, _ = self.lifo(output)
+        output, _ = self.lifo(output)
         
         return output
     
