@@ -542,9 +542,9 @@ def train():
             print("[Torch.Compile] Compiling model... (backend='inductor')")
         model = torch.compile(model, backend="inductor")
 
-    # Wrap DDP
+    # Wrap DDP - find_unused_parameters=True needed because LIF has both spike/frequency paths
     if IS_DDP:
-        model = DDP(model, device_ids=[config["local_rank"]])
+        model = DDP(model, device_ids=[config["local_rank"]], find_unused_parameters=True)
 
     # Print model summary
     if is_main_process():
