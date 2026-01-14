@@ -307,6 +307,9 @@ class LIF(nn.Module):
     - SPIKE mode (frequency_mode=False): Temporal simulation over n_steps
     - FREQUENCY mode (frequency_mode=True): Quantized activation, no temporal expansion
     
+    IMPORTANT: When learn_beta=True, the frequency mode dynamically uses the learned
+    beta from the spike LIF to ensure equivalence during training.
+    
     Args:
         beta: Leak factor (0 < beta <= 1)
         v_th: Threshold voltage
@@ -332,12 +335,14 @@ class LIF(nn.Module):
         super().__init__()
         
         self.n_steps = n_steps
-        self.v_th = v_th
+        self.init_v_th = v_th
+        self.learn_beta = learn_beta
         
         # Get appropriate spike-based LIF class
         LIFClass = get_lif_class()
         
         # Create inner temporal LIF module (spike mode)
+        # This is the authoritative source for learned parameters
         self._lif_spike = LIFClass(
             beta=beta,
             v_th=v_th,
@@ -349,25 +354,57 @@ class LIF(nn.Module):
             learn_v_reset=learn_v_reset
         )
         
-        # Create frequency LIF module
-        from .Lif_Frequency import LIFFrequency
-        self._lif_freq = LIFFrequency(
-            n_steps=n_steps,
-            v_th=v_th,
-            beta=beta,
-            learn_v_th=learn_v_th
-        )
-        
         self.backend = "triton" if TRITON_AVAILABLE else "pytorch"
         
         # Mode: False = spike (default), True = frequency
         self.frequency_mode = False
     
+    def _compute_frequency_output(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Calcule la sortie en mode fréquence en utilisant les paramètres actuels du LIF spike.
+        
+        Formule: frequency = quantize(ReLU(x * gain / T / v_th), T niveaux)
+        où gain = (1 - beta^T) / (1 - beta) pour tenir compte du leak
+        """
+        # Get current beta from spike LIF (may be learned)
+        beta = self._lif_spike.beta
+        if isinstance(beta, torch.Tensor):
+            beta_val = beta.item()
+        else:
+            beta_val = float(beta)
+        
+        # Get current v_th
+        v_th = self._lif_spike.v_th
+        if not isinstance(v_th, torch.Tensor):
+            v_th = torch.tensor(v_th, device=x.device, dtype=x.dtype)
+        
+        # Compute effective gain: (1 - beta^T) / (1 - beta)
+        if abs(beta_val - 1.0) < 1e-6:
+            gain = float(self.n_steps)
+        else:
+            gain = (1.0 - beta_val ** self.n_steps) / (1.0 - beta_val)
+        
+        # Entrée effective = input * gain / T
+        x_effective = x * gain / self.n_steps
+        
+        # Normaliser par le seuil
+        x_normalized = x_effective / v_th
+        
+        # ReLU + Clamp à [0, 1]
+        x_clamped = torch.clamp(torch.relu(x_normalized), 0.0, 1.0)
+        
+        # Quantifier avec STE
+        from .Lif_Frequency import STEQuantize
+        output = STEQuantize.apply(x_clamped, self.n_steps)
+        
+        return output
+    
     def forward(self, input_current: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.frequency_mode:
-            # Mode FREQUENCY: pas de répétition temporelle
+            # Mode FREQUENCY: calcul dynamique avec beta actuel
             # Input: [B, ...] -> Output: [B, ...]
-            return self._lif_freq(input_current)
+            output = self._compute_frequency_output(input_current)
+            return output, None
         else:
             # Mode SPIKE: simulation temporelle
             # Input attend [T*B, ...] (pré-répété) -> Output: [T*B, ...]
@@ -376,9 +413,17 @@ class LIF(nn.Module):
     def get_beta(self) -> float:
         return self._lif_spike.get_beta()
     
+    @property
+    def beta(self):
+        return self._lif_spike.beta
+    
+    @property
+    def v_th(self):
+        return self._lif_spike.v_th
+    
     def extra_repr(self) -> str:
         mode = "frequency" if self.frequency_mode else "spike"
-        return f'backend={self.backend}, mode={mode}'
+        return f'backend={self.backend}, mode={mode}, learn_beta={self.learn_beta}'
 
 
 # Export check function

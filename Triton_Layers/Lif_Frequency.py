@@ -68,31 +68,35 @@ class LIFFrequency(nn.Module):
     Remplace la dynamique temporelle du LIF par une fonction d'activation
     en escalier (staircase function) qui représente la fréquence de décharge.
     
+    Prend en compte le facteur de leak (beta):
+    - Pour beta=1: pas de leak, accumulation complète
+    - Pour beta<1: leak, l'entrée effective est réduite
+    
+    Le gain effectif sur T pas de temps est:
+    gain = (1 - beta^T) / (1 - beta)  pour beta != 1
+    gain = T                           pour beta = 1
+    
     Équivalence mathématique:
-    - Un neurone LIF avec entrée constante sur T pas produit en moyenne
-      n_spikes = clip(floor(T * input / threshold), 0, T) spikes
-    - La fréquence normalisée est donc n_spikes / T ∈ {0, 1/T, ..., 1}
+    - Entrée effective = input * gain / T
+    - frequency = quantize(ReLU(entrée_effective / v_th), T niveaux)
     
     Args:
-        n_steps (int): Nombre de pas de temps (T), détermine le nombre de niveaux
-        v_th (float): Seuil de déclenchement (normalisation de l'entrée)
+        n_steps (int): Nombre de pas de temps (T)
+        v_th (float): Seuil de déclenchement
+        beta (float): Facteur de leak (0 < beta <= 1)
         learn_v_th (bool): Si True, v_th devient apprenable
-        
-    Shape:
-        - Input: Toute forme (B, ...) avec B divisible par n_steps
-        - Output: Même forme que l'entrée
     """
     
     def __init__(
         self,
         n_steps: int = 4,
         v_th: float = 1.0,
-        beta: float = 0.9,  # Ignoré en mode fréquence, mais gardé pour compatibilité API
-        v_reset: float = 0.0,  # Ignoré
-        k_superspike: float = 4.0,  # Ignoré
-        learn_beta: bool = False,  # Ignoré
+        beta: float = 0.9,
+        v_reset: float = 0.0,  # Gardé pour compatibilité API
+        k_superspike: float = 4.0,  # Gardé pour compatibilité API
+        learn_beta: bool = False,  # Gardé pour compatibilité API
         learn_v_th: bool = False,
-        learn_v_reset: bool = False  # Ignoré
+        learn_v_reset: bool = False  # Gardé pour compatibilité API
     ):
         super().__init__()
         
@@ -104,46 +108,58 @@ class LIFFrequency(nn.Module):
         else:
             self.register_buffer('v_th', torch.tensor(v_th))
         
-        # Stocké pour compatibilité API avec LIF
+        # Beta (leak factor)
         self.register_buffer('beta', torch.tensor(beta))
         self.register_buffer('v_reset', torch.tensor(v_reset))
+        
+        # Précalcul du gain effectif
+        # gain = (1 - beta^T) / (1 - beta) pour beta != 1
+        # gain = T pour beta = 1
+        if abs(beta - 1.0) < 1e-6:
+            gain = float(n_steps)
+        else:
+            gain = (1.0 - beta ** n_steps) / (1.0 - beta)
+        self.register_buffer('effective_gain', torch.tensor(gain))
     
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Propagation avant en mode fréquentiel.
         
-        Approximation correcte du LIF:
-        - LIF ne fire que pour des entrées positives au-dessus du seuil
-        - Pour une entrée constante I sur T pas de temps:
-          n_spikes ≈ floor(T * ReLU(I) / v_th), borné par T
-          frequency = n_spikes / T ∈ {0, 1/T, 2/T, ..., 1}
+        Approximation du LIF avec leak:
+        1. Calcul de l'entrée effective en tenant compte du gain (beta)
+        2. ReLU: LIF ne fire que pour entrées positives
+        3. Normalisation par seuil et nombre de pas
+        4. Quantification avec STE
         
         Args:
             x: Tenseur d'entrée de forme quelconque (B, ...)
             
         Returns:
-            output: Fréquences quantifiées (même forme que x)
-            v_mem_final: None (pas de concept de membrane en mode fréquence)
+            output: Fréquences quantifiées dans {0, 1/T, ..., 1}
+            v_mem_final: None (pas de membrane en mode fréquence)
         """
-        # Normaliser par le seuil
-        x_normalized = x / self.v_th
+        # Entrée effective = input * gain / T
+        # Cela représente combien le potentiel de membrane s'accumule en moyenne
+        x_effective = x * self.effective_gain / self.n_steps
         
-        # ReLU: LIF ne fire que pour entrées positives
-        # Clamp à [0, 1]: la fréquence max est 1 (fire à chaque pas)
+        # Normaliser par le seuil
+        x_normalized = x_effective / self.v_th
+        
+        # ReLU + Clamp à [0, 1]
+        # LIF ne fire que pour entrées positives, fréquence max = 1
         x_clamped = torch.clamp(torch.relu(x_normalized), 0.0, 1.0)
         
         # Quantifier avec STE à n_steps niveaux
         output = STEQuantize.apply(x_clamped, self.n_steps)
         
-        # Pas de membrane en mode fréquence
-        v_mem_final = None
-        
-        return output, v_mem_final
+        return output, None
     
     def extra_repr(self) -> str:
         return (
             f'n_steps={self.n_steps}, '
-            f'v_th={self.v_th.item():.3f}'
+            f'v_th={self.v_th.item():.3f}, '
+            f'beta={self.beta.item():.3f}, '
+            f'gain={self.effective_gain.item():.3f}'
         )
 
 
