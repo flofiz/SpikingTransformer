@@ -179,7 +179,13 @@ class SSAMultiHeadAttention(nn.Module):
     
     def xnor_attention_frequency(self, Q, K):
         """
+        [DEPRECATED - Kept for reference]
         Équivalent probabiliste de l'attention XNOR pour l'entraînement fréquentiel.
+        
+        NOTE: This method is no longer used in the current implementation.
+        We now use Strategy A: binarize Q/K explicitly before XNOR attention
+        to ensure consistency with the binary assumption of XNOR/Hamming distance.
+        This method is kept for documentation and potential future experiments.
         
         Formule: P(XNOR=1) = 2*q*k - q - k + 1
         
@@ -282,10 +288,23 @@ class SSAMultiHeadAttention(nn.Module):
         K = K.view(B, N_k, self.n_heads, self.d_head).transpose(1, 2)
         V = V.view(B, N_k, self.n_heads, self.d_head).transpose(1, 2)
 
-        # XNOR attention (probabiliste si frequency_mode, binaire sinon)
+        # XNOR attention with strategy A: binarize Q/K in frequency mode
         if self.frequency_mode:
-            attn_output = self.xnor_attention_frequency(Q, K)
+            # Strategy A: Explicitly binarize Q and K before XNOR/Hamming computation
+            # to respect the binary assumption of the algorithm.
+            # V remains multi-level to preserve information richness.
+            from .ste_ops import binarize_ste
+            
+            # Binarize Q and K with STE (threshold=0.5 means values >= 0.5 -> 1)
+            # The LIF outputs are quantized in [0, 1], so 0.5 is a natural midpoint
+            Q_binary = binarize_ste(Q, threshold=0.5)
+            K_binary = binarize_ste(K, threshold=0.5)
+            
+            # Use standard XNOR attention with binarized inputs
+            # This ensures consistency with spike mode where Q/K are naturally binary
+            attn_output = self.xnor_attention(Q_binary, K_binary)
         else:
+            # Spike mode: Q and K are already binary spikes, use XNOR directly
             attn_output = self.xnor_attention(Q, K)
         
         # Log-PE (commun aux deux modes)
