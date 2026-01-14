@@ -361,31 +361,90 @@ class LIF(nn.Module):
     
     def _compute_frequency_output(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Calcule la sortie en mode fréquence.
+        Compute LIF frequency output with ISI-based approximation.
         
-        Pour une entrée constante avec reset après chaque spike:
-        - Le gain (1-beta^T)/(1-beta) suppose PAS de reset (incorrect)
-        - Avec reset, la fréquence de décharge est simplement I/v_th
-        - Car après chaque spike, on reset et recommence l'accumulation
+        For a discrete LIF neuron with leak (beta) and hard reset, the average firing
+        rate for constant input I over T timesteps can be approximated using the
+        Inter-Spike Interval (ISI) theory.
         
-        Formule simplifiée: frequency = quantize(ReLU(x / v_th), T niveaux)
+        **Theory:**
+        For constant current I > v_th, a leaky integrate-and-fire neuron with:
+        - Leak factor beta (membrane voltage decay)
+        - Threshold v_th
+        - Hard reset to v_reset (typically 0)
+        
+        The membrane voltage evolves as:
+            v[t] = beta * v[t-1] + I    (when v < v_th)
+            v[t] = v_reset              (when v >= v_th, spike and reset)
+        
+        The time to first spike (ISI) starting from v_reset can be derived:
+        For beta < 1 (leaky neuron):
+            The steady-state input required to reach v_th is:
+            v_th = I * (1 - beta^ISI) / (1 - beta)  when no spike occurs
+            
+        For constant input with periodic spiking (reset after each spike):
+            ISI = log(1 - v_th*(1-beta)/I) / log(beta)  (continuous approximation)
+            
+        For discrete timesteps, a simplified approximation that works well:
+            - If I >> v_th: neuron spikes every timestep (rate ≈ 1)
+            - If I ≈ v_th: ISI depends on beta (more leak = longer ISI = lower rate)
+            - If I < v_th: neuron rarely/never spikes
+            
+        **Practical approximation:**
+        We use a beta-adjusted effective input:
+            I_eff = I / v_th * gain_factor
+        where gain_factor accounts for the accumulation efficiency with leak:
+            gain_factor = (1 - beta^T) / (1 - beta) / T  for beta ≠ 1
+            gain_factor = 1                               for beta = 1 (no leak)
+        
+        This gives a normalized rate estimate that:
+        1. Approaches 0 when I << v_th (sub-threshold)
+        2. Approaches 1 when I >> v_th (saturates to spike every step)
+        3. Depends on beta (lower beta = more leak = lower rate for same input)
+        4. Is quantized to n_steps levels for STE gradient training
+        
+        **Numerical stability:**
+        - Use clamp to keep values in [0, 1] range
+        - Add small epsilon (1e-7) to prevent division by zero
+        - Compatible with AMP (automatic mixed precision)
+        
+        Args:
+            x: Input tensor (constant current over T steps)
+            
+        Returns:
+            Quantized firing rate in {0, 1/T, 2/T, ..., 1}
         """
-        # Get current v_th from spike LIF (may be learned)
+        # Get current parameters from spike LIF (may be learned)
         v_th = self._lif_spike.v_th
         if not isinstance(v_th, torch.Tensor):
             v_th = torch.tensor(v_th, device=x.device, dtype=x.dtype)
         
-        # Normaliser par le seuil - formule directe sans gain
-        # Avec reset après chaque spike, freq ≈ I / v_th
-        x_normalized = x / v_th
+        # Get beta value
+        beta_val = self.get_beta()
+        beta = torch.tensor(beta_val, device=x.device, dtype=x.dtype)
         
-        # ReLU: LIF ne fire que pour entrées positives
-        # Clamp à [0, 1]: fréquence max = 1 (fire chaque pas)
-        x_clamped = torch.clamp(torch.relu(x_normalized), 0.0, 1.0)
+        # Compute gain factor for accumulation efficiency with leak
+        # gain = (1 - beta^T) / ((1 - beta) * T)
+        # This represents the effective integration efficiency per timestep
+        eps = 1e-7
+        if abs(beta_val - 1.0) < eps:
+            # No leak case: beta ≈ 1, full accumulation
+            gain = torch.tensor(1.0, device=x.device, dtype=x.dtype)
+        else:
+            # With leak: reduced accumulation efficiency
+            beta_T = torch.pow(beta, self.n_steps)
+            gain = (1.0 - beta_T) / ((1.0 - beta + eps) * self.n_steps)
         
-        # Quantifier avec STE
+        # Normalize input by threshold and adjust for leak
+        # This gives an estimate of firing rate per timestep
+        x_normalized = torch.relu(x) / (v_th + eps) * gain
+        
+        # Clamp to [0, 1]: rate cannot be negative or exceed 1 spike/step
+        rate = torch.clamp(x_normalized, 0.0, 1.0)
+        
+        # Quantize with STE to n_steps levels for training
         from .Lif_Frequency import STEQuantize
-        output = STEQuantize.apply(x_clamped, self.n_steps)
+        output = STEQuantize.apply(rate, self.n_steps)
         
         return output
     
