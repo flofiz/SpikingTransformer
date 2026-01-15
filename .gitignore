@@ -2,10 +2,12 @@
 *.log
 *.logs
 checkpoints/
+checkpoints*/
 Triton_Layers/Lif_bcp.py
 notebook.ipynb
 wandb_key.txt
 wandb/
+rapport/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

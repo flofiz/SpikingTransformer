@@ -60,11 +60,18 @@ class Seq2Seq(nn.Module):
         in_channels: Number of input channels (1 for grayscale, 3 for RGB)
         img_height: Height of input images (needed for channel computation)
         encoder_type: Vision encoder type - "cnn" (CNNBackbone) or "scs" (Spikformer V2 SCS)
+        n_heads_encoder: Number of attention heads for encoder (default: 8)
+        n_heads_decoder: Number of attention heads for decoder (default: 8)
+        mssa_scales: Scales for MSSA
+        in_channels: Number of input channels (1 for grayscale, 3 for RGB)
+        img_height: Height of input images (needed for channel computation)
+        encoder_type: Vision encoder type - "cnn" (CNNBackbone) or "scs" (Spikformer V2 SCS)
     """
     def __init__(self,
                  patch_size: int = 16,
                  d_model: int = 512,
-                 n_heads: int = 8,
+                 n_heads_encoder: int = 8,
+                 n_heads_decoder: int = 8,
                  ff_dim: int = 2048,
                  num_encoder_layers: int = 6,
                  num_decoder_layers: int = 6,
@@ -108,7 +115,7 @@ class Seq2Seq(nn.Module):
         self.encoder = Encoder(
             num_layers=num_encoder_layers,
             d_model=d_model,
-            n_heads=n_heads,
+            n_heads=n_heads_encoder,
             ff_dim=ff_dim,
             dropout=dropout,
             alpha=alpha,
@@ -122,7 +129,7 @@ class Seq2Seq(nn.Module):
         self.decoder = Decoder(
             num_layers=num_decoder_layers,
             d_model=d_model,
-            n_heads=n_heads,
+            n_heads=n_heads_decoder,
             ff_dim=ff_dim,
             dropout=dropout,
             alpha=alpha,

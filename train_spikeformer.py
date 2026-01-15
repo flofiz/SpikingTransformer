@@ -367,7 +367,8 @@ def train():
     # HYPERPARAMETERS - Optimized
     # ============================================
     EMB_SIZE = 384
-    NHEAD = 6  # Must be divisible by len(mssa_scales) if use_mssa=True
+    NHEAD_ENCODER = 6  # Must be divisible by len(mssa_scales) if use_mssa=True
+    NHEAD_DECODER = 12  # Separate head count for decoder
     FFN_HID_DIM = 4 * EMB_SIZE
     NUM_ENCODER_LAYERS = 12
     NUM_DECODER_LAYERS = 6
@@ -395,16 +396,17 @@ def train():
     RANK = config["rank"]
     WORLD_SIZE = config["world_size"]
 
-    # Adjust NHEAD for MSSA compatibility
-    if USE_MSSA and NHEAD % len(MSSA_SCALES) != 0:
-        NHEAD = len(MSSA_SCALES) * (NHEAD // len(MSSA_SCALES) + 1)
+    # Adjust NHEAD_ENCODER for MSSA compatibility (MSSA only affects encoder)
+    if USE_MSSA and NHEAD_ENCODER % len(MSSA_SCALES) != 0:
+        NHEAD_ENCODER = len(MSSA_SCALES) * (NHEAD_ENCODER // len(MSSA_SCALES) + 1)
         if is_main_process():
-            print(f"[MSSA] Adjusted NHEAD to {NHEAD} for compatibility with {len(MSSA_SCALES)} scales")
+            print(f"[MSSA] Adjusted NHEAD_ENCODER to {NHEAD_ENCODER} for compatibility with {len(MSSA_SCALES)} scales")
 
     # Create config dict for WandB
     wandb_config = {
         "emb_size": EMB_SIZE,
-        "n_heads": NHEAD,
+        "n_heads_encoder": NHEAD_ENCODER,
+        "n_heads_decoder": NHEAD_DECODER,
         "ffn_dim": FFN_HID_DIM,
         "num_encoder_layers": NUM_ENCODER_LAYERS,
         "num_decoder_layers": NUM_DECODER_LAYERS,
@@ -527,7 +529,8 @@ def train():
         num_encoder_layers=NUM_ENCODER_LAYERS,
         num_decoder_layers=NUM_DECODER_LAYERS,
         d_model=EMB_SIZE,
-        n_heads=NHEAD,
+        n_heads_encoder=NHEAD_ENCODER,
+        n_heads_decoder=NHEAD_DECODER,
         tgt_vocab_size=VOCAB_SIZE,
         ff_dim=FFN_HID_DIM,
         n_steps=NUM_STEPS,
