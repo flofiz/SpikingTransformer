@@ -2,7 +2,7 @@ import torch.nn as nn
 import torch
 from .Encoder import Encoder
 from .Decoder import Decoder
-from .ImageEncoder import CNNBackbone
+from .ImageEncoder import CNNBackbone, SpikingConvolutionalStem
 from .Lif import LIF
 import math
 from typing import Literal, List, Optional
@@ -59,6 +59,7 @@ class Seq2Seq(nn.Module):
         mssa_scales: Scales for MSSA
         in_channels: Number of input channels (1 for grayscale, 3 for RGB)
         img_height: Height of input images (needed for channel computation)
+        encoder_type: Vision encoder type - "cnn" (CNNBackbone) or "scs" (Spikformer V2 SCS)
     """
     def __init__(self,
                  patch_size: int = 16,
@@ -77,19 +78,32 @@ class Seq2Seq(nn.Module):
                  mssa_scales: List[int] = [1, 2, 4],
                  in_channels: int = 1,
                  img_height: int = 32,
-                 gradient_checkpointing: bool = False):
+                 gradient_checkpointing: bool = False,
+                 encoder_type: Literal["cnn", "scs"] = "cnn"):
         super().__init__()
         self.n_steps = n_steps
         self.mask_mode = mask_mode
+        self.encoder_type = encoder_type
         
-        self.image_encoder = CNNBackbone(
-            nb_layers=nb_sps_blocks,
-            patch_size=patch_size,
-            d_model=d_model,
-            n_steps=n_steps,
-            in_channels=in_channels,
-            img_height=img_height
-        )
+        # Select vision encoder based on encoder_type
+        if encoder_type == "scs":
+            self.image_encoder = SpikingConvolutionalStem(
+                d_model=d_model,
+                patch_size=patch_size,
+                n_steps=n_steps,
+                in_channels=in_channels,
+                img_height=img_height,
+                nb_expansion_blocks=nb_sps_blocks  # Use same count for expansion blocks
+            )
+        else:  # Default: "cnn"
+            self.image_encoder = CNNBackbone(
+                nb_layers=nb_sps_blocks,
+                patch_size=patch_size,
+                d_model=d_model,
+                n_steps=n_steps,
+                in_channels=in_channels,
+                img_height=img_height
+            )
         
         self.encoder = Encoder(
             num_layers=num_encoder_layers,

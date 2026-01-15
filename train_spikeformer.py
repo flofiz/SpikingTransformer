@@ -326,6 +326,8 @@ def parse_args():
     parser.add_argument("--in_channels", type=int, default=3, choices=[1, 3], 
                         help="Input channels: 1 for grayscale, 3 for RGB")
     parser.add_argument("--num_steps", type=int, default=8, help="Number of SNN timesteps")
+    parser.add_argument("--encoder_type", type=str, default="cnn", choices=["cnn", "scs"],
+                        help="Vision encoder: 'cnn' (CNNBackbone) or 'scs' (Spikformer V2 SCS)")
 
     # Optimization
     parser.add_argument("--no_gradient_checkpointing", action="store_false", dest="gradient_checkpointing",
@@ -367,9 +369,10 @@ def train():
     EMB_SIZE = 384
     NHEAD = 6  # Must be divisible by len(mssa_scales) if use_mssa=True
     FFN_HID_DIM = 4 * EMB_SIZE
-    NUM_ENCODER_LAYERS = 6
+    NUM_ENCODER_LAYERS = 12
     NUM_DECODER_LAYERS = 6
     NUM_STEPS = args.num_steps
+    PATCH_SIZE = 16
     LR = args.lr  # Reduced from 1e-3 to 5e-4 for SNN stability
     BATCH_SIZE = config["batch_size"]
     NUM_EPOCHS = args.epochs
@@ -377,7 +380,7 @@ def train():
     LOG_EVERY = 100
     EVAL_EVERY = 2000
     LOG_PRINT_EVERY = 1000
-    MAX_CHARS = 80 
+    MAX_CHARS = 32 
     GRAD_CLIP_NORM = 1.0
     WEIGHT_DECAY = 0.01
     MASK_MODE = args.mask_mode
@@ -385,6 +388,7 @@ def train():
     MSSA_SCALES = [int(x) for x in args.mssa_scales.split(",")]
     IN_CHANNELS = args.in_channels
     GRADIENT_CHECKPOINTING = args.gradient_checkpointing
+    ENCODER_TYPE = args.encoder_type
 
     # Config DDP
     IS_DDP = config["is_ddp"]
@@ -416,8 +420,8 @@ def train():
         "use_mssa": USE_MSSA,
         "mssa_scales": MSSA_SCALES,
         "in_channels": IN_CHANNELS,
-        "in_channels": IN_CHANNELS,
         "gradient_checkpointing": GRADIENT_CHECKPOINTING,
+        "encoder_type": ENCODER_TYPE,
         "world_size": WORLD_SIZE,
         "is_ddp": IS_DDP
     }
@@ -442,6 +446,7 @@ def train():
             print(f"  MSSA scales: {MSSA_SCALES}")
         print(f"  NUM_STEPS: {NUM_STEPS}")
         print(f"  Gradient Checkpointing: {GRADIENT_CHECKPOINTING}")
+        print(f"  Encoder Type: {ENCODER_TYPE} ({'CNNBackbone' if ENCODER_TYPE == 'cnn' else 'Spikformer V2 SCS'})")
         print(f"  WandB logging: {WANDB_AVAILABLE}")
         print("="*60 + "\n")
 
@@ -527,13 +532,14 @@ def train():
         ff_dim=FFN_HID_DIM,
         n_steps=NUM_STEPS,
         nb_sps_blocks=4,
-        patch_size=4,
+        patch_size=PATCH_SIZE,
         mask_mode=MASK_MODE,       # New: configurable mask mode
         use_mssa=USE_MSSA,         # New: Multi-Scale Spiking Attention
         mssa_scales=MSSA_SCALES,   # New: MSSA scales
         in_channels=IN_CHANNELS,   # New: RGB or grayscale input
         img_height=IMG_SIZE[0],    # New: image height for channel computation
         gradient_checkpointing=GRADIENT_CHECKPOINTING, # New: gradient checkpointing
+        encoder_type=ENCODER_TYPE, # New: Vision encoder type (cnn or scs)
     ).to(config["device"])
 
     # Compile model if requested
