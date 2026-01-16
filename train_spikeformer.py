@@ -317,6 +317,12 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=None, help="Batch size (auto-detected if not specified)")
     parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate (default: 5e-4)")
     parser.add_argument("--epochs", type=int, default=1, help="Number of epochs")
+
+    # Checkpointing
+    parser.add_argument("--model_name", type=str, default="spikeformer", help="Name of the model (creates checkpoints/model_name/)")
+    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints", help="Base directory for checkpoints")
+    parser.add_argument("--resume_from", type=str, default=None, help="Specific checkpoint path to resume from")
+    parser.add_argument("--load_weights_only", action="store_true", help="Load only model weights (ignore optimizer/scheduler/step)")
     
     # Model config
     parser.add_argument("--mask_mode", type=str, default="multiply", choices=["multiply", "additive"],
@@ -849,52 +855,80 @@ def train():
             print("✅ Tous les paramètres sont dans l'optimizer")
 
     # ============================================
-    # RESUME FROM CHECKPOINT
+    # CHECKPOINT PATHS & RESUME LOGIC
     # ============================================
-    ckpt_path = "checkpoints/spikeformer2_best.pt"
-    start_epoch = 1
+    run_dir = os.path.join(args.checkpoint_dir, args.model_name)
+    if is_main_process():
+        os.makedirs(run_dir, exist_ok=True)
+        print(f"Checkpoint directory: {run_dir}")
+
+    ckpt_last = os.path.join(run_dir, "last.pt")
+    ckpt_best = os.path.join(run_dir, "best.pt")
     
-    if os.path.exists(ckpt_path):
+    # Determine what to load
+    ckpt_to_load = None
+    if args.resume_from:
+        ckpt_to_load = args.resume_from
+    elif os.path.exists(ckpt_last):
+        ckpt_to_load = ckpt_last
+    
+    start_epoch = 1
+
+    if ckpt_to_load and os.path.exists(ckpt_to_load):
         if is_main_process():
             print(f"\n{'='*60}")
-            print(f"🔄 Checkpoint trouvé: {ckpt_path}")
-            print("Chargement en cours...")
+            print(f"🔄 Loading checkpoint: {ckpt_to_load}")
+            if args.load_weights_only:
+                print("   (Weights Only Mode - resetting step/optimizer)")
         
         # Load map_location to cpu or specific device to avoid OOM
-        checkpoint = torch.load(ckpt_path, map_location=config["device"])
+        checkpoint = torch.load(ckpt_to_load, map_location=config["device"])
         
-        # If DDP, looking for "module." prefix in keys usually handled by load_state_dict automatically?
-        # Typically if saving DDP model, keys have "module.". If loading into DDP model, it works.
-        # If loading non-DDP checkpoint into DDP model, might need adjustment.
-        # Or if loading DDP checkpoint into non-DDP model.
-        # We assume checkpoints are compatible re: keys. 
-        
+        # Load Model Weights
         msg = model.load_state_dict(checkpoint["model"], strict=False)
         if is_main_process():
-            print(f"Model loaded: {msg}")
+            print(f"   Model loaded: {msg}")
         
-        if "optimizer" in checkpoint and checkpoint["optimizer"] is not None:
-            optimizer.load_state_dict(checkpoint["optimizer"])
-            print("Optimizer loaded")
+        # Load State (if not weights_only)
+        if not args.load_weights_only:
+            if "optimizer" in checkpoint and checkpoint["optimizer"] is not None:
+                try:
+                    optimizer.load_state_dict(checkpoint["optimizer"])
+                    if is_main_process(): print("   Optimizer loaded")
+                except Exception as e:
+                    if is_main_process(): print(f"   ⚠️ Could not load optimizer: {e}")
+                
+            if "scheduler" in checkpoint and checkpoint["scheduler"] is not None:
+                try:
+                    scheduler.load_state_dict(checkpoint["scheduler"])
+                    if is_main_process(): print("   Scheduler loaded")
+                except Exception as e:
+                    if is_main_process(): print(f"   ⚠️ Could not load scheduler: {e}")
+                
+            global_step = checkpoint.get("step", 0)
+            best_val = checkpoint.get("val_loss", float("inf"))
             
-        if "scheduler" in checkpoint and checkpoint["scheduler"] is not None:
-            scheduler.load_state_dict(checkpoint["scheduler"])
+            steps_per_epoch = len(train_loader)
+            if steps_per_epoch > 0:
+                start_epoch = (global_step // steps_per_epoch) + 1
+                
             if is_main_process():
-                print("Scheduler loaded")
-            
-        global_step = checkpoint.get("step", 0)
-        best_val = checkpoint.get("val_loss", float("inf"))
-        
-        steps_per_epoch = len(train_loader)
-        if steps_per_epoch > 0:
-            start_epoch = (global_step // steps_per_epoch) + 1
-            
+                print(f"   Resuming from step {global_step} (Epoch {start_epoch})")
+                print(f"   Previous Best Val Loss: {best_val:.4f}")
+        else:
+             if is_main_process():
+                print("   Skipping optimizer/scheduler load (Fresh start)")
+                
         if is_main_process():
-            print(f"Resuming from step {global_step} (Epoch {start_epoch}), Best Val Loss: {best_val:.4f}")
             print(f"{'='*60}\n", flush=True)
+
     else:
-        if is_main_process():
-            print(f"\n⚠️ Aucun checkpoint trouvé à {ckpt_path}. Démarrage de zéro.\n", flush=True)
+        if args.resume_from:
+             if is_main_process():
+                print(f"\n⚠️ WARNING: Checkpoint '{args.resume_from}' not found. Starting from scratch.\n", flush=True)
+        else:
+            if is_main_process():
+                print(f"\n✨ No previous checkpoint known. Starting new run: {args.model_name}\n", flush=True)
 
 
     for epoch in range(start_epoch, NUM_EPOCHS + 1):
@@ -1016,11 +1050,7 @@ def train():
                         "val/perplexity": val_ppl,
                     }, step=global_step)
                     
-                    if val_loss < best_val:
-                        best_val = val_loss
-                        os.makedirs("checkpoints", exist_ok=True)
-                        ckpt_path = "checkpoints/spikeformer2_best.pt"
-                        torch.save({
+                    save_dict = {
                             "model": model.state_dict(), 
                             "optimizer": optimizer.state_dict(), 
                             "scheduler": scheduler.state_dict(),
@@ -1042,8 +1072,15 @@ def train():
                                 "in_channels": IN_CHANNELS,
                                 "num_steps": NUM_STEPS,
                             }
-                        }, ckpt_path)
-                        print(f"✅ Saved best checkpoint to {ckpt_path} (val_loss: {val_loss:.4f})\n")
+                        }
+                    
+                    # Always save 'last' checkpoint
+                    torch.save(save_dict, ckpt_last)
+                    
+                    if val_loss < best_val:
+                        best_val = val_loss
+                        torch.save(save_dict, ckpt_best)
+                        print(f"✅ Saved best checkpoint to {ckpt_best} (val_loss: {val_loss:.4f})\n")
                         
                         # Log best model to WandB
                         if WANDB_AVAILABLE and wandb is not None:
