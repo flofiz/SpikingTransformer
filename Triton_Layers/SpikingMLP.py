@@ -1,5 +1,5 @@
 import torch.nn as nn
-from .Lif import LIF
+from .lif_auto import LIF
 
 class SpikingMLP(nn.Module):
     """

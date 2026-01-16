@@ -1,7 +1,7 @@
 import torch
 import triton
 import triton.language as tl
-from .Lif import LIF
+from .lif_auto import LIF
 import torch.nn as nn
 import torch.nn.functional as F
 import math

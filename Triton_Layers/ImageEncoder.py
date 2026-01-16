@@ -2,7 +2,7 @@ import math
 import torch
 from torch import nn
 from einops import rearrange
-from .Lif import LIF
+from .lif_auto import LIF
 
 
 class FusedInvertedBottleneck(nn.Module):

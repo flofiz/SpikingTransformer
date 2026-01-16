@@ -3,7 +3,7 @@ import torch
 from .Encoder import Encoder
 from .Decoder import Decoder
 from .ImageEncoder import CNNBackbone, SpikingConvolutionalStem
-from .Lif import LIF
+from .lif_auto import LIF
 import math
 from typing import Literal, List, Optional
 

@@ -25,7 +25,12 @@ _triton_import_error = None
 try:
     import triton
     import triton.language as tl
-    TRITON_AVAILABLE = True
+    # Ensure CUDA is actually available (and not just the package installed on CPU)
+    if torch.cuda.is_available():
+        TRITON_AVAILABLE = True
+    else:
+        TRITON_AVAILABLE = False
+        _triton_import_error = "CUDA not available"
 except ImportError as e:
     _triton_import_error = str(e)
     TRITON_AVAILABLE = False
