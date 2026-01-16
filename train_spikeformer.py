@@ -387,7 +387,7 @@ def train():
     LOG_EVERY = 100
     EVAL_EVERY = 2000
     LOG_PRINT_EVERY = 1000
-    MAX_CHARS = 32 
+    MAX_CHARS = 80 
     GRAD_CLIP_NORM = 1.0
     WEIGHT_DECAY = 0.01
     MASK_MODE = args.mask_mode
