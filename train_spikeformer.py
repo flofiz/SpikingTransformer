@@ -619,8 +619,8 @@ def train():
         total_steps=total_steps,
         pct_start=0.1,
         anneal_strategy='cos',
-        div_factor=25,
-        final_div_factor=1e4
+        div_factor=4,
+        final_div_factor=1e3
     )
 
     # ============================================
@@ -1031,7 +1031,8 @@ def train():
                             "val_ppl": val_ppl,
                             "config": {
                                 "emb_size": EMB_SIZE,
-                                "nhead": NHEAD,
+                                "n_heads_encoder": NHEAD_ENCODER,
+                                "n_heads_decoder": NHEAD_DECODER,
                                 "num_encoder_layers": NUM_ENCODER_LAYERS,
                                 "num_decoder_layers": NUM_DECODER_LAYERS,
                                 "vocab_size": VOCAB_SIZE,

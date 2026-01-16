@@ -241,7 +241,7 @@ def get_font_pool(
         # Scan font directories
         font_dirs = [
             str(base_path / "Fonts"),
-            str(base_path / "fonts_HW"),
+            # str(base_path / "fonts_HW"),
         ]
         
         if multiprocessing.current_process().name == "MainProcess":
